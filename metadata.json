@@ -1,0 +1,6 @@
+{
+  "name": "Quiz Escolar",
+  "description": "Plataforma interativa de perguntas e respostas escolares de múltipla escolha com correção automática, pontuação em tempo real e gerador de arquivos HTML/CSS/JS.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
