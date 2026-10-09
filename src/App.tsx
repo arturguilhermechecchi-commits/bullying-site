@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   RotateCcw,
   ArrowRight,
@@ -34,81 +34,142 @@ export interface QuizSubmission {
 }
 
 export default function App() {
-  const [questions, setQuestions] = useState<Question[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.map((q) => ({
-            ...q,
-            options: Array.isArray(q.options) ? q.options.slice(0, 3) : ['', '', '']
-          })) as Question[];
-        }
-      }
-    } catch {
-      // Fallback to initial questions
-    }
-    return INITIAL_QUESTIONS;
-  });
-
-  // Saved global A, B, C options text so they persist across all questions
-  const [savedDefaultOptions, setSavedDefaultOptions] = useState<[string, string, string]>(() => {
-    try {
-      const savedOpts = localStorage.getItem(SAVED_OPTIONS_KEY);
-      if (savedOpts) {
-        const parsed = JSON.parse(savedOpts);
-        if (Array.isArray(parsed) && parsed.length >= 3) {
-          return [String(parsed[0] || ''), String(parsed[1] || ''), String(parsed[2] || '')];
-        }
-      }
-    } catch {
-      // Ignore storage errors
-    }
-    return ['', '', ''];
-  });
-
-  // Anonymous response history for Admin Charts
-  const [submissions, setSubmissions] = useState<QuizSubmission[]>(() => {
-    try {
-      const saved = localStorage.getItem(RESPONSES_HISTORY_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
-      }
-    } catch {
-      // Ignore storage errors
-    }
-    return [];
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(questions));
-    } catch {
-      // Ignore storage errors
-    }
-  }, [questions]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(SAVED_OPTIONS_KEY, JSON.stringify(savedDefaultOptions));
-    } catch {
-      // Ignore storage errors
-    }
-  }, [savedDefaultOptions]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(submissions));
-    } catch {
-      // Ignore storage errors
-    }
-  }, [submissions]);
+  const [questions, setQuestions] = useState<Question[]>(INITIAL_QUESTIONS);
+  const [savedDefaultOptions, setSavedDefaultOptions] = useState<[string, string, string]>([
+    '',
+    '',
+    ''
+  ]);
+  const [submissions, setSubmissions] = useState<QuizSubmission[]>([]);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
   const [isAdminOpen, setIsAdminOpen] = useState<boolean>(false);
   const [adminTab, setAdminTab] = useState<'perguntas' | 'grafico'>('perguntas');
   const typedBufferRef = useRef<string>('');
+
+  // Admin Form state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [questionText, setQuestionText] = useState<string>('');
+  const [options, setOptions] = useState<[string, string, string]>(['', '', '']);
+  const [applyToAllQuestions, setApplyToAllQuestions] = useState<boolean>(true);
+  const [adminMessage, setAdminMessage] = useState<string | null>(null);
+
+  // Sync helper to persist changes to the shared server
+  const syncQuestionsToServer = useCallback(
+    async (nextQuestions: Question[], nextSavedOptions: [string, string, string]) => {
+      try {
+        const res = await fetch('/api/quiz/questions', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            questions: nextQuestions,
+            savedDefaultOptions: nextSavedOptions
+          })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setQuestions(data.questions || nextQuestions);
+          setSavedDefaultOptions(data.savedDefaultOptions || nextSavedOptions);
+        }
+      } catch {
+        // Ignore network errors
+      }
+    },
+    []
+  );
+
+  // Fetch shared questions & responses from backend on load, migrating any existing local data if server is empty
+  const fetchSharedQuizData = useCallback(async (isInitial = false) => {
+    try {
+      const res = await fetch('/api/quiz');
+      if (!res.ok) return;
+      const serverData = await res.json();
+
+      // One-time automatic migration: if server is empty but admin already created questions in this browser, push them to the server so everyone sees them
+      if (isInitial && Array.isArray(serverData.questions) && serverData.questions.length === 0) {
+        const localQuestionsRaw = localStorage.getItem(STORAGE_KEY);
+        const localOptionsRaw = localStorage.getItem(SAVED_OPTIONS_KEY);
+        const localQuestions = localQuestionsRaw ? JSON.parse(localQuestionsRaw) : [];
+        const localOptions = localOptionsRaw ? JSON.parse(localOptionsRaw) : ['', '', ''];
+
+        if (Array.isArray(localQuestions) && localQuestions.length > 0) {
+          const normalizedOptions: [string, string, string] =
+            Array.isArray(localOptions) && localOptions.length >= 3
+              ? [
+                  String(localOptions[0] || ''),
+                  String(localOptions[1] || ''),
+                  String(localOptions[2] || '')
+                ]
+              : ['', '', ''];
+
+          await syncQuestionsToServer(localQuestions, normalizedOptions);
+          setQuestions(localQuestions);
+          setSavedDefaultOptions(normalizedOptions);
+          setOptions(normalizedOptions);
+          return;
+        }
+      }
+
+      if (Array.isArray(serverData.questions)) {
+        setQuestions(serverData.questions);
+      }
+      if (
+        Array.isArray(serverData.savedDefaultOptions) &&
+        serverData.savedDefaultOptions.length >= 3
+      ) {
+        const nextSaved: [string, string, string] = [
+          String(serverData.savedDefaultOptions[0] || ''),
+          String(serverData.savedDefaultOptions[1] || ''),
+          String(serverData.savedDefaultOptions[2] || '')
+        ];
+        setSavedDefaultOptions(nextSaved);
+        if (isInitial) {
+          setOptions(nextSaved);
+        }
+      }
+      if (Array.isArray(serverData.submissions)) {
+        setSubmissions(serverData.submissions);
+      }
+    } catch {
+      // Fallback to localStorage if offline
+      if (isInitial) {
+        const localQuestionsRaw = localStorage.getItem(STORAGE_KEY);
+        if (localQuestionsRaw) {
+          try {
+            setQuestions(JSON.parse(localQuestionsRaw));
+          } catch {
+            // Ignore
+          }
+        }
+      }
+    } finally {
+      if (isInitial) setIsLoading(false);
+    }
+  }, [syncQuestionsToServer]);
+
+  useEffect(() => {
+    fetchSharedQuizData(true);
+    // Periodically refresh shared data so new questions and chart answers appear for everyone
+    const interval = setInterval(() => {
+      if (!isAdminOpen) {
+        fetchSharedQuizData(false);
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [fetchSharedQuizData, isAdminOpen]);
+
+  // Also keep local backup synced
+  useEffect(() => {
+    if (!isLoading) {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(questions));
+        localStorage.setItem(SAVED_OPTIONS_KEY, JSON.stringify(savedDefaultOptions));
+        localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(submissions));
+      } catch {
+        // Ignore storage errors
+      }
+    }
+  }, [questions, savedDefaultOptions, submissions, isLoading]);
 
   // Listen for the secret sequence "010203" typed anywhere on the page
   useEffect(() => {
@@ -127,6 +188,7 @@ export default function App() {
         typedBufferRef.current = (typedBufferRef.current + e.key).slice(-ADMIN_ACCESS_CODE.length);
         if (typedBufferRef.current === ADMIN_ACCESS_CODE) {
           setIsAdminOpen(true);
+          fetchSharedQuizData(false);
           typedBufferRef.current = '';
         }
       } else {
@@ -136,20 +198,13 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [fetchSharedQuizData]);
 
   // Quiz state
   const [hasStartedQuiz, setHasStartedQuiz] = useState<boolean>(false);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, number>>({});
   const [isQuizFinished, setIsQuizFinished] = useState<boolean>(false);
-
-  // Admin Form state (options A, B, C stay populated with savedDefaultOptions)
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [questionText, setQuestionText] = useState<string>('');
-  const [options, setOptions] = useState<[string, string, string]>(savedDefaultOptions);
-  const [applyToAllQuestions, setApplyToAllQuestions] = useState<boolean>(true);
-  const [adminMessage, setAdminMessage] = useState<string | null>(null);
 
   const currentQuestion = questions[currentIndex];
   const currentSelectedOption = currentQuestion ? selectedOptions[currentQuestion.id] ?? null : null;
@@ -159,6 +214,7 @@ export default function App() {
     setCurrentIndex(0);
     setSelectedOptions({});
     setIsQuizFinished(false);
+    fetchSharedQuizData(false);
   };
 
   const handleOptionClick = (idx: number) => {
@@ -169,19 +225,36 @@ export default function App() {
     }));
   };
 
-  const handleNextQuestion = () => {
+  const handleNextQuestion = async () => {
     if (currentSelectedOption === null) return;
     if (currentIndex + 1 < questions.length) {
       setCurrentIndex((prev) => prev + 1);
     } else {
-      // Record anonymous submission for Admin Charts
-      const newSubmission: QuizSubmission = {
-        id: `sub-${Date.now()}`,
-        submittedAt: new Date().toISOString(),
-        answers: { ...selectedOptions }
-      };
-      setSubmissions((prev) => [...prev, newSubmission]);
+      const finalAnswers = { ...selectedOptions };
       setIsQuizFinished(true);
+      try {
+        const res = await fetch('/api/quiz/submissions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ answers: finalAnswers })
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.submissions)) {
+            setSubmissions(data.submissions);
+          }
+        }
+      } catch {
+        // Fallback local record
+        setSubmissions((prev) => [
+          ...prev,
+          {
+            id: `sub-${Date.now()}`,
+            submittedAt: new Date().toISOString(),
+            answers: finalAnswers
+          }
+        ]);
+      }
     }
   };
 
@@ -223,7 +296,7 @@ export default function App() {
     setOptions(nextSavedOptions ?? savedDefaultOptions);
   };
 
-  const handleSaveQuestion = (e: React.FormEvent) => {
+  const handleSaveQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!questionText.trim() || options.some((opt) => !opt.trim())) {
       setAdminMessage('Preencha o enunciado da pergunta e todas as 3 alternativas (A, B e C).');
@@ -238,23 +311,23 @@ export default function App() {
 
     setSavedDefaultOptions(cleanedOptions);
 
+    let updatedList: Question[] = [];
+
     if (editingId) {
-      setQuestions((prev) =>
-        prev.map((q) => {
-          if (q.id === editingId) {
-            return {
-              ...q,
-              question: questionText.trim(),
-              options: cleanedOptions
-            };
-          }
-          return applyToAllQuestions ? { ...q, options: cleanedOptions } : q;
-        })
-      );
+      updatedList = questions.map((q) => {
+        if (q.id === editingId) {
+          return {
+            ...q,
+            question: questionText.trim(),
+            options: cleanedOptions
+          };
+        }
+        return applyToAllQuestions ? { ...q, options: cleanedOptions } : q;
+      });
       setAdminMessage(
         applyToAllQuestions
-          ? 'Pergunta atualizada e alternativas A, B e C salvas para todas as perguntas!'
-          : 'Pergunta atualizada com sucesso!'
+          ? 'Pergunta atualizada e publicada para todos os usuários!'
+          : 'Pergunta atualizada com sucesso para todos!'
       );
     } else {
       const newQuestion: Question = {
@@ -262,24 +335,21 @@ export default function App() {
         question: questionText.trim(),
         options: cleanedOptions
       };
-      setQuestions((prev) => {
-        const updatedExisting = applyToAllQuestions
-          ? prev.map((q) => ({ ...q, options: cleanedOptions }))
-          : prev;
-        return [...updatedExisting, newQuestion];
-      });
-      setAdminMessage(
-        applyToAllQuestions
-          ? 'Nova pergunta adicionada e alternativas A, B e C salvas para todas as perguntas!'
-          : 'Nova pergunta cadastrada com sucesso!'
-      );
+      const baseList = applyToAllQuestions
+        ? questions.map((q) => ({ ...q, options: cleanedOptions }))
+        : questions;
+      updatedList = [...baseList, newQuestion];
+      setAdminMessage('Nova pergunta cadastrada e disponível para todos os usuários!');
     }
+
+    setQuestions(updatedList);
+    await syncQuestionsToServer(updatedList, cleanedOptions);
 
     resetAdminForm(cleanedOptions);
     setTimeout(() => setAdminMessage(null), 3000);
   };
 
-  const handleApplyOptionsToAllNow = () => {
+  const handleApplyOptionsToAllNow = async () => {
     if (options.some((opt) => !opt.trim())) {
       setAdminMessage('Preencha o texto das alternativas A, B e C antes de salvar para todas.');
       return;
@@ -289,9 +359,11 @@ export default function App() {
       options[1].trim(),
       options[2].trim()
     ];
+    const updatedList = questions.map((q) => ({ ...q, options: cleanedOptions }));
     setSavedDefaultOptions(cleanedOptions);
-    setQuestions((prev) => prev.map((q) => ({ ...q, options: cleanedOptions })));
-    setAdminMessage('As alternativas A, B e C foram salvas e aplicadas em todas as perguntas!');
+    setQuestions(updatedList);
+    await syncQuestionsToServer(updatedList, cleanedOptions);
+    setAdminMessage('As alternativas A, B e C foram salvas em todas as perguntas para todos!');
     setTimeout(() => setAdminMessage(null), 3000);
   };
 
@@ -302,23 +374,31 @@ export default function App() {
     setAdminMessage(null);
   };
 
-  const handleDeleteQuestion = (id: string) => {
-    setQuestions((prev) => prev.filter((q) => q.id !== id));
+  const handleDeleteQuestion = async (id: string) => {
+    const updatedList = questions.filter((q) => q.id !== id);
+    setQuestions(updatedList);
     if (editingId === id) {
       resetAdminForm();
     }
     setCurrentIndex(0);
     setIsQuizFinished(false);
+    await syncQuestionsToServer(updatedList, savedDefaultOptions);
   };
 
-  const handleClearAllQuestions = () => {
+  const handleClearAllQuestions = async () => {
     setQuestions([]);
     resetAdminForm();
     handleRestartQuiz();
+    await syncQuestionsToServer([], savedDefaultOptions);
   };
 
-  const handleClearAllSubmissions = () => {
+  const handleClearAllSubmissions = async () => {
     setSubmissions([]);
+    try {
+      await fetch('/api/quiz/submissions', { method: 'DELETE' });
+    } catch {
+      // Ignore network error
+    }
   };
 
   const BAR_COLORS = ['bg-sky-600', 'bg-emerald-600', 'bg-amber-500'] as const;
@@ -354,7 +434,7 @@ export default function App() {
               <div>
                 <div className="flex items-center gap-2 text-xs text-slate-500 mb-1">
                   <Shield className="w-3.5 h-3.5 text-sky-600" />
-                  <span>Administração Autorizada</span>
+                  <span>Administração Autorizada · Sincronizado para Todos</span>
                 </div>
                 <h1 className="text-2xl font-bold text-slate-900 font-display">
                   Painel do Administrador
@@ -378,7 +458,10 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => setAdminTab('grafico')}
+                    onClick={() => {
+                      setAdminTab('grafico');
+                      fetchSharedQuizData(false);
+                    }}
                     className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer ${
                       adminTab === 'grafico'
                         ? 'bg-white text-slate-900 shadow-xs'
@@ -526,7 +609,7 @@ export default function App() {
                         Perguntas Cadastradas ({questions.length})
                       </h2>
                       <p className="text-xs text-slate-500">
-                        Gerencie, edite ou exclua as questões do Quiz Escolar
+                        Visíveis automaticamente para todos que abrirem o site
                       </p>
                     </div>
 
@@ -761,7 +844,10 @@ export default function App() {
             <div className="flex justify-center pt-2">
               <button
                 type="button"
-                onClick={() => setHasStartedQuiz(true)}
+                onClick={() => {
+                  fetchSharedQuizData(false);
+                  setHasStartedQuiz(true);
+                }}
                 className="px-6 py-3 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-700 rounded-lg transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Play className="w-4 h-4" />
