@@ -1,0 +1,356 @@
+{
+  "entities": {
+    "Question": {
+      "title": "Question",
+      "description": "Represents a multiple-choice school quiz question with 3 options (A, B, C).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the question.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "question": {
+          "type": "string",
+          "description": "The question prompt text.",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "optA": {
+          "type": "string",
+          "description": "Text for multiple choice option A.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "optB": {
+          "type": "string",
+          "description": "Text for multiple choice option B.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "optC": {
+          "type": "string",
+          "description": "Text for multiple choice option C.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "orderIndex": {
+          "type": "number",
+          "description": "Ordering index of the question."
+        },
+        "isPublished": {
+          "type": "boolean",
+          "description": "Whether the question is visible to all quiz participants."
+        },
+        "adminPasscode": {
+          "type": "string",
+          "description": "Authorized admin access code verification.",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^010203$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the question was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the question was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "optA",
+        "optB",
+        "optC",
+        "orderIndex",
+        "isPublished",
+        "adminPasscode",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "GlobalSettings": {
+      "title": "GlobalSettings",
+      "description": "Global quiz configuration including persistent default A, B, C options and VPN Portal Host settings.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Setting document identifier (global).",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "optA": {
+          "type": "string",
+          "description": "Saved default text for option A across all questions.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "optB": {
+          "type": "string",
+          "description": "Saved default text for option B across all questions.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "optC": {
+          "type": "string",
+          "description": "Saved default text for option C across all questions.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "customVpnHost": {
+          "type": "string",
+          "description": "Configured custom VPN Host IP or domain URL.",
+          "minLength": 0,
+          "maxLength": 256
+        },
+        "isPublished": {
+          "type": "boolean",
+          "description": "Whether the global configuration is active for all clients."
+        },
+        "adminPasscode": {
+          "type": "string",
+          "description": "Authorized admin access code verification.",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^010203$"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when settings were last updated."
+        }
+      },
+      "required": [
+        "id",
+        "optA",
+        "optB",
+        "optC",
+        "customVpnHost",
+        "isPublished",
+        "adminPasscode",
+        "updatedAt"
+      ]
+    },
+    "Submission": {
+      "title": "Submission",
+      "description": "Represents a completed anonymous quiz submission summary.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the submission.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "totalQuestions": {
+          "type": "number",
+          "description": "Total number of questions answered in this submission."
+        },
+        "countA": {
+          "type": "number",
+          "description": "Count of option A choices in this submission."
+        },
+        "countB": {
+          "type": "number",
+          "description": "Count of option B choices in this submission."
+        },
+        "countC": {
+          "type": "number",
+          "description": "Count of option C choices in this submission."
+        },
+        "isAnonymous": {
+          "type": "boolean",
+          "description": "Always true to guarantee anonymous submission."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the submission was recorded."
+        }
+      },
+      "required": [
+        "id",
+        "totalQuestions",
+        "countA",
+        "countB",
+        "countC",
+        "isAnonymous",
+        "createdAt"
+      ]
+    },
+    "QuestionResponse": {
+      "title": "QuestionResponse",
+      "description": "Represents an individual anonymous vote for a specific question within a submission.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the question response.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "submissionId": {
+          "type": "string",
+          "description": "Reference ID of the parent Submission document.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "questionId": {
+          "type": "string",
+          "description": "Reference ID of the answered Question document.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "selectedOption": {
+          "type": "number",
+          "description": "Chosen option index: 0 for A, 1 for B, 2 for C.",
+          "enum": [0, 1, 2]
+        },
+        "isAnonymous": {
+          "type": "boolean",
+          "description": "Always true to guarantee anonymous response."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the response was recorded."
+        }
+      },
+      "required": [
+        "id",
+        "submissionId",
+        "questionId",
+        "selectedOption",
+        "isAnonymous",
+        "createdAt"
+      ]
+    },
+    "VpnGateway": {
+      "title": "VpnGateway",
+      "description": "Represents a registered VPN Portal Host gateway endpoint.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier for the VPN gateway.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "label": {
+          "type": "string",
+          "description": "Display label for the VPN gateway (e.g., Radmin Sala 1, Tailscale Escola).",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "hostUrl": {
+          "type": "string",
+          "description": "URL or IP:Port of the VPN host endpoint.",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "provider": {
+          "type": "string",
+          "description": "VPN provider type (Tailscale, Radmin, ZeroTier, Hamachi, WireGuard).",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "isPublished": {
+          "type": "boolean",
+          "description": "Whether the gateway is active and listed in the portal."
+        },
+        "adminPasscode": {
+          "type": "string",
+          "description": "Authorized admin access code verification.",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^010203$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the gateway was registered."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the gateway was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "hostUrl",
+        "provider",
+        "isPublished",
+        "adminPasscode",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Admin": {
+      "title": "Admin",
+      "description": "Authorized administrator user record.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the administrator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "description": "Verified email address of the administrator.",
+          "minLength": 3,
+          "maxLength": 256
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the admin record was created."
+        }
+      },
+      "required": ["uid", "email", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/questions/{questionId}": {
+      "schema": { "$ref": "#/entities/Question" },
+      "description": "Stores multiple-choice school quiz questions (A, B, C) visible to all users."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/GlobalSettings" },
+      "description": "Stores global default A, B, C option labels and VPN Portal Host configuration."
+    },
+    "/submissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/Submission" },
+      "description": "Stores anonymous completed quiz submission summaries."
+    },
+    "/responses/{responseId}": {
+      "schema": { "$ref": "#/entities/QuestionResponse" },
+      "description": "Stores individual per-question anonymous votes linked to a submission and question."
+    },
+    "/vpnGateways/{gatewayId}": {
+      "schema": { "$ref": "#/entities/VpnGateway" },
+      "description": "Stores VPN Portal Host endpoints configured by the administrator."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/Admin" },
+      "description": "Stores administrator UIDs and verified emails."
+    }
+  }
+}

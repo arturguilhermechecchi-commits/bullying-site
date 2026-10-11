@@ -20,6 +20,15 @@ interface StoreData {
   questions: Question[];
   savedDefaultOptions: [string, string, string];
   submissions: QuizSubmission[];
+  customVpnHost?: string;
+}
+
+export interface NetworkEndpoint {
+  interfaceName: string;
+  ip: string;
+  url: string;
+  type: 'vpn' | 'lan';
+  providerLabel: string;
 }
 
 const DATA_FILE = path.resolve(process.cwd(), 'quiz-store.json');
@@ -39,7 +48,8 @@ function loadStore(): StoreData {
                 String(parsed.savedDefaultOptions[2] || '')
               ]
             : ['', '', ''],
-        submissions: Array.isArray(parsed.submissions) ? parsed.submissions : []
+        submissions: Array.isArray(parsed.submissions) ? parsed.submissions : [],
+        customVpnHost: parsed.customVpnHost ? String(parsed.customVpnHost) : ''
       };
     }
   } catch (err) {
@@ -48,7 +58,8 @@ function loadStore(): StoreData {
   return {
     questions: [],
     savedDefaultOptions: ['', '', ''],
-    submissions: []
+    submissions: [],
+    customVpnHost: ''
   };
 }
 
@@ -60,28 +71,77 @@ function saveStore(data: StoreData): void {
   }
 }
 
-function getLocalNetworkAddresses(port: number): string[] {
+function classifyNetworkInterface(name: string, ip: string): { type: 'vpn' | 'lan'; providerLabel: string } {
+  const lower = name.toLowerCase();
+
+  // Tailscale / CGNAT range 100.64.0.0/10
+  const octets = ip.split('.').map(Number);
+  if (octets[0] === 100 && octets[1] >= 64 && octets[1] <= 127) {
+    return { type: 'vpn', providerLabel: 'Tailscale / WireGuard VPN' };
+  }
+  if (octets[0] === 26) {
+    return { type: 'vpn', providerLabel: 'Radmin VPN' };
+  }
+  if (octets[0] === 25) {
+    return { type: 'vpn', providerLabel: 'LogMeIn Hamachi VPN' };
+  }
+  if (
+    lower.includes('tailscale') ||
+    lower.includes('zerotier') ||
+    lower.includes('zt') ||
+    lower.includes('wg') ||
+    lower.includes('wireguard') ||
+    lower.includes('tun') ||
+    lower.includes('tap') ||
+    lower.includes('radmin') ||
+    lower.includes('hamachi') ||
+    lower.includes('vpn') ||
+    lower.includes('nordlynx') ||
+    lower.includes('proton') ||
+    lower.includes('cloudflarewarp') ||
+    lower.includes('utun')
+  ) {
+    return { type: 'vpn', providerLabel: `Adaptador VPN (${name})` };
+  }
+
+  return { type: 'lan', providerLabel: `Rede Local (${name})` };
+}
+
+function getNetworkEndpoints(port: number): NetworkEndpoint[] {
   const interfaces = os.networkInterfaces();
-  const urls: string[] = [];
+  const endpoints: NetworkEndpoint[] = [];
+
   for (const name of Object.keys(interfaces)) {
     for (const net of interfaces[name] || []) {
       if (net.family === 'IPv4' && !net.internal) {
-        urls.push(`http://${net.address}:${port}`);
+        const { type, providerLabel } = classifyNetworkInterface(name, net.address);
+        endpoints.push({
+          interfaceName: name,
+          ip: net.address,
+          url: `http://${net.address}:${port}`,
+          type,
+          providerLabel
+        });
       }
     }
   }
-  return urls;
+  return endpoints;
 }
 
 async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  // Enable CORS so the app can be accessed from any domain, tunnel, or network
+  // Enable proxy & VPN/Tunnel compatibility headers (CORS + Private Network Access for VPNs)
+  app.set('trust proxy', true);
   app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Bypass-Tunnel-Reminder');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type, Bypass-Tunnel-Reminder, X-Forwarded-For, X-Forwarded-Host, X-Real-IP'
+    );
+    res.setHeader('Access-Control-Allow-Private-Network', 'true');
     if (req.method === 'OPTIONS') {
       res.sendStatus(204);
       return;
@@ -91,15 +151,46 @@ async function startServer() {
 
   app.use(express.json({ limit: '2mb' }));
 
-  // Get server localhost, LAN, and public internet URL info
+  // Health / Ping route for VPN clients & portals
+  app.get('/api/vpn-ping', (req, res) => {
+    res.json({
+      status: 'online',
+      clientIp: req.ip || req.socket.remoteAddress || 'desconhecido',
+      timestamp: new Date().toISOString(),
+      port: PORT
+    });
+  });
+
+  // Save custom VPN Host IP/Domain configured by Admin
+  app.put('/api/vpn-host', (req, res) => {
+    const store = loadStore();
+    const { customVpnHost } = req.body;
+    store.customVpnHost = customVpnHost ? String(customVpnHost).trim() : '';
+    saveStore(store);
+    res.json({ customVpnHost: store.customVpnHost });
+  });
+
+  // Get server localhost, LAN, VPN interfaces, and public internet URL info
   app.get('/api/server-info', (req, res) => {
+    const store = loadStore();
     const forwardedProto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
-    const hostHeader = (req.headers['x-forwarded-host'] as string) || req.headers.host || `localhost:${PORT}`;
-    const detectedOrigin = `${forwardedProto.split(',')[0].trim()}://${hostHeader.split(',')[0].trim()}`;
+    const hostHeader =
+      (req.headers['x-forwarded-host'] as string) || req.headers.host || `localhost:${PORT}`;
+    const detectedOrigin = `${forwardedProto.split(',')[0].trim()}://${hostHeader
+      .split(',')[0]
+      .trim()}`;
+
+    const endpoints = getNetworkEndpoints(PORT);
+    const vpnEndpoints = endpoints.filter((e) => e.type === 'vpn');
+    const lanEndpoints = endpoints.filter((e) => e.type === 'lan');
 
     res.json({
       localhostUrl: `http://localhost:${PORT}`,
-      networkUrls: getLocalNetworkAddresses(PORT),
+      networkUrls: endpoints.map((e) => e.url),
+      vpnEndpoints,
+      lanEndpoints,
+      customVpnHost: store.customVpnHost || '',
+      clientIp: req.ip || req.socket.remoteAddress || '127.0.0.1',
       publicAppUrl: process.env.APP_URL || detectedOrigin,
       port: PORT
     });
@@ -186,11 +277,13 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    const lanUrls = getLocalNetworkAddresses(PORT);
+    const endpoints = getNetworkEndpoints(PORT);
     console.log('====================================================');
-    console.log('Quiz Escolar — Servidor Universal Iniciado!');
+    console.log('Quiz Escolar — Portal Host VPN & Universal Iniciado!');
     console.log(`➜ Localhost:        http://localhost:${PORT}`);
-    lanUrls.forEach((url) => console.log(`➜ Rede Wi-Fi Local: ${url}`));
+    endpoints.forEach((ep) => {
+      console.log(`➜ ${ep.providerLabel}: ${ep.url}`);
+    });
     if (process.env.APP_URL) {
       console.log(`➜ Internet Global:  ${process.env.APP_URL}`);
     }

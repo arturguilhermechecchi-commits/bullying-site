@@ -1,0 +1,375 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        (request.auth.token.email == 'arturguilhermechecchi@gmail.com' && request.auth.token.email_verified == true) ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function hasValidAdminPasscode(data) {
+      return data.adminPasscode is string &&
+        data.adminPasscode.size() == 6 &&
+        data.adminPasscode.matches('^010203$');
+    }
+
+    // Entity Blueprint Validators
+    function isValidQuestion(data) {
+      return data.keys().hasAll([
+          'id',
+          'question',
+          'optA',
+          'optB',
+          'optC',
+          'orderIndex',
+          'isPublished',
+          'adminPasscode',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'question',
+          'optA',
+          'optB',
+          'optC',
+          'orderIndex',
+          'isPublished',
+          'adminPasscode',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.question is string && data.question.size() >= 1 && data.question.size() <= 1000 &&
+        data.optA is string && data.optA.size() >= 1 && data.optA.size() <= 500 &&
+        data.optB is string && data.optB.size() >= 1 && data.optB.size() <= 500 &&
+        data.optC is string && data.optC.size() >= 1 && data.optC.size() <= 500 &&
+        data.orderIndex is int && data.orderIndex >= 0 && data.orderIndex <= 10000 &&
+        data.isPublished is bool &&
+        hasValidAdminPasscode(data) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidGlobalSettings(data) {
+      return data.keys().hasAll([
+          'id',
+          'optA',
+          'optB',
+          'optC',
+          'customVpnHost',
+          'isPublished',
+          'adminPasscode',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'optA',
+          'optB',
+          'optC',
+          'customVpnHost',
+          'isPublished',
+          'adminPasscode',
+          'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.optA is string && data.optA.size() >= 0 && data.optA.size() <= 500 &&
+        data.optB is string && data.optB.size() >= 0 && data.optB.size() <= 500 &&
+        data.optC is string && data.optC.size() >= 0 && data.optC.size() <= 500 &&
+        data.customVpnHost is string && data.customVpnHost.size() >= 0 && data.customVpnHost.size() <= 256 &&
+        data.isPublished is bool &&
+        hasValidAdminPasscode(data) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSubmission(data) {
+      return data.keys().hasAll([
+          'id',
+          'totalQuestions',
+          'countA',
+          'countB',
+          'countC',
+          'isAnonymous',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'totalQuestions',
+          'countA',
+          'countB',
+          'countC',
+          'isAnonymous',
+          'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 500 &&
+        data.countA is int && data.countA >= 0 && data.countA <= 500 &&
+        data.countB is int && data.countB >= 0 && data.countB <= 500 &&
+        data.countC is int && data.countC >= 0 && data.countC <= 500 &&
+        (data.countA + data.countB + data.countC == data.totalQuestions) &&
+        data.isAnonymous is bool && data.isAnonymous == true &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidQuestionResponse(data) {
+      return data.keys().hasAll([
+          'id',
+          'submissionId',
+          'questionId',
+          'selectedOption',
+          'isAnonymous',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'submissionId',
+          'questionId',
+          'selectedOption',
+          'isAnonymous',
+          'createdAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.submissionId) &&
+        isValidId(data.questionId) &&
+        data.selectedOption is int && data.selectedOption >= 0 && data.selectedOption <= 2 &&
+        data.isAnonymous is bool && data.isAnonymous == true &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidVpnGateway(data) {
+      return data.keys().hasAll([
+          'id',
+          'label',
+          'hostUrl',
+          'provider',
+          'isPublished',
+          'adminPasscode',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id',
+          'label',
+          'hostUrl',
+          'provider',
+          'isPublished',
+          'adminPasscode',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        data.label is string && data.label.size() >= 1 && data.label.size() <= 120 &&
+        data.hostUrl is string && data.hostUrl.size() >= 1 && data.hostUrl.size() <= 256 &&
+        data.provider is string && data.provider.size() >= 1 && data.provider.size() <= 80 &&
+        data.isPublished is bool &&
+        hasValidAdminPasscode(data) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 256 &&
+        data.createdAt is timestamp;
+    }
+
+    // Connection health check endpoint
+    match /test/{testId} {
+      allow get: if isValidId(testId);
+      allow list, create, update, delete: if false;
+    }
+
+    // 1. Questions Collection
+    match /questions/{questionId} {
+      allow get: if isValidId(questionId);
+      allow list: if existing().isPublished == true;
+
+      allow create: if isValidId(questionId) &&
+        isValidQuestion(incoming()) &&
+        incoming().id == questionId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (hasValidAdminPasscode(incoming()) || isAdmin());
+
+      allow update: if isValidId(questionId) &&
+        isValidQuestion(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            hasValidAdminPasscode(incoming()) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'question',
+              'optA',
+              'optB',
+              'optC',
+              'orderIndex',
+              'isPublished',
+              'adminPasscode',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(questionId) &&
+        (isAdmin() || existing().adminPasscode == '010203');
+    }
+
+    // 2. Global Settings Collection
+    match /settings/{settingId} {
+      allow get: if isValidId(settingId) && settingId == 'global';
+      allow list: if existing().isPublished == true;
+
+      allow create: if isValidId(settingId) &&
+        settingId == 'global' &&
+        isValidGlobalSettings(incoming()) &&
+        incoming().id == settingId &&
+        incoming().updatedAt == request.time &&
+        (hasValidAdminPasscode(incoming()) || isAdmin());
+
+      allow update: if isValidId(settingId) &&
+        settingId == 'global' &&
+        isValidGlobalSettings(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            hasValidAdminPasscode(incoming()) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'optA',
+              'optB',
+              'optC',
+              'customVpnHost',
+              'isPublished',
+              'adminPasscode',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // 3. Anonymous Submissions Collection
+    match /submissions/{submissionId} {
+      allow get: if isValidId(submissionId);
+      allow list: if existing().isAnonymous == true;
+
+      allow create: if isValidId(submissionId) &&
+        isValidSubmission(incoming()) &&
+        incoming().id == submissionId &&
+        incoming().createdAt == request.time;
+
+      allow update: if false;
+
+      allow delete: if isValidId(submissionId) &&
+        (isAdmin() || existing().isAnonymous == true);
+    }
+
+    // 4. Per-Question Anonymous Responses Collection
+    match /responses/{responseId} {
+      allow get: if isValidId(responseId);
+      allow list: if existing().isAnonymous == true;
+
+      allow create: if isValidId(responseId) &&
+        isValidQuestionResponse(incoming()) &&
+        incoming().id == responseId &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/questions/$(incoming().questionId)) &&
+        (
+          exists(/databases/$(database)/documents/submissions/$(incoming().submissionId)) ||
+          existsAfter(/databases/$(database)/documents/submissions/$(incoming().submissionId))
+        );
+
+      allow update: if false;
+
+      allow delete: if isValidId(responseId) &&
+        (isAdmin() || existing().isAnonymous == true);
+    }
+
+    // 5. VPN Portal Host Gateways Collection
+    match /vpnGateways/{gatewayId} {
+      allow get: if isValidId(gatewayId);
+      allow list: if existing().isPublished == true;
+
+      allow create: if isValidId(gatewayId) &&
+        isValidVpnGateway(incoming()) &&
+        incoming().id == gatewayId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (hasValidAdminPasscode(incoming()) || isAdmin());
+
+      allow update: if isValidId(gatewayId) &&
+        isValidVpnGateway(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          isAdmin() ||
+          (
+            hasValidAdminPasscode(incoming()) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'label',
+              'hostUrl',
+              'provider',
+              'isPublished',
+              'adminPasscode',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(gatewayId) &&
+        (isAdmin() || existing().adminPasscode == '010203');
+    }
+
+    // 6. Admins Collection (PII Isolated)
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isSignedIn() && existing().uid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+        isValidId(adminId) &&
+        isValidAdmin(incoming()) &&
+        incoming().uid == adminId &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+
+      allow update: if false;
+      allow delete: if isValidId(adminId) && isAdmin();
+    }
+  }
+}
