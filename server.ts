@@ -1,5 +1,6 @@
 import express from 'express';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 
@@ -59,11 +60,50 @@ function saveStore(data: StoreData): void {
   }
 }
 
+function getLocalNetworkAddresses(port: number): string[] {
+  const interfaces = os.networkInterfaces();
+  const urls: string[] = [];
+  for (const name of Object.keys(interfaces)) {
+    for (const net of interfaces[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        urls.push(`http://${net.address}:${port}`);
+      }
+    }
+  }
+  return urls;
+}
+
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+
+  // Enable CORS so the app can be accessed from any domain, tunnel, or network
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Bypass-Tunnel-Reminder');
+    if (req.method === 'OPTIONS') {
+      res.sendStatus(204);
+      return;
+    }
+    next();
+  });
 
   app.use(express.json({ limit: '2mb' }));
+
+  // Get server localhost, LAN, and public internet URL info
+  app.get('/api/server-info', (req, res) => {
+    const forwardedProto = (req.headers['x-forwarded-proto'] as string) || req.protocol || 'http';
+    const hostHeader = (req.headers['x-forwarded-host'] as string) || req.headers.host || `localhost:${PORT}`;
+    const detectedOrigin = `${forwardedProto.split(',')[0].trim()}://${hostHeader.split(',')[0].trim()}`;
+
+    res.json({
+      localhostUrl: `http://localhost:${PORT}`,
+      networkUrls: getLocalNetworkAddresses(PORT),
+      publicAppUrl: process.env.APP_URL || detectedOrigin,
+      port: PORT
+    });
+  });
 
   // Get shared quiz state for all users
   app.get('/api/quiz', (_req, res) => {
@@ -130,7 +170,10 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: true
+      },
       appType: 'spa'
     });
     app.use(vite.middlewares);
@@ -143,7 +186,15 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    const lanUrls = getLocalNetworkAddresses(PORT);
+    console.log('====================================================');
+    console.log('Quiz Escolar — Servidor Universal Iniciado!');
+    console.log(`➜ Localhost:        http://localhost:${PORT}`);
+    lanUrls.forEach((url) => console.log(`➜ Rede Wi-Fi Local: ${url}`));
+    if (process.env.APP_URL) {
+      console.log(`➜ Internet Global:  ${process.env.APP_URL}`);
+    }
+    console.log('====================================================');
   });
 }
 
