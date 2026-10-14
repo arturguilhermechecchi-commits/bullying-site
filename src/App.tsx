@@ -29,6 +29,7 @@ import {
 } from 'lucide-react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { INITIAL_QUESTIONS, Question } from './data/questions';
+import { correctPortugueseText } from './utils/grammarPtBr';
 import {
   db,
   auth,
@@ -194,9 +195,9 @@ export default function App() {
       const startTime = performance.now();
 
       try {
-        const cleanOptA = (optionsToPush[0] || '').trim().slice(0, MAX_OPTION_LEN);
-        const cleanOptB = (optionsToPush[1] || '').trim().slice(0, MAX_OPTION_LEN);
-        const cleanOptC = (optionsToPush[2] || '').trim().slice(0, MAX_OPTION_LEN);
+        const cleanOptA = correctPortugueseText(optionsToPush[0] || '').slice(0, MAX_OPTION_LEN);
+        const cleanOptB = correctPortugueseText(optionsToPush[1] || '').slice(0, MAX_OPTION_LEN);
+        const cleanOptC = correctPortugueseText(optionsToPush[2] || '').slice(0, MAX_OPTION_LEN);
         const cleanVpn = (vpnHostToPush || '').trim().slice(0, MAX_VPN_HOST_LEN);
 
         // 1. Force write to settings/global
@@ -219,10 +220,19 @@ export default function App() {
         for (let i = 0; i < questionsToPush.length; i++) {
           const q = questionsToPush[i];
           const qId = sanitizeId(q.id || `q-${Date.now()}-${i}`);
-          const qText = (q.question || '').trim().slice(0, MAX_QUESTION_LEN);
-          const qOptA = (q.options[0] || cleanOptA || 'Opção A').trim().slice(0, MAX_OPTION_LEN);
-          const qOptB = (q.options[1] || cleanOptB || 'Opção B').trim().slice(0, MAX_OPTION_LEN);
-          const qOptC = (q.options[2] || cleanOptC || 'Opção C').trim().slice(0, MAX_OPTION_LEN);
+          const qText = correctPortugueseText(q.question || '', true).slice(0, MAX_QUESTION_LEN);
+          const qOptA = correctPortugueseText(q.options[0] || cleanOptA || 'Alternativa A').slice(
+            0,
+            MAX_OPTION_LEN
+          );
+          const qOptB = correctPortugueseText(q.options[1] || cleanOptB || 'Alternativa B').slice(
+            0,
+            MAX_OPTION_LEN
+          );
+          const qOptC = correctPortugueseText(q.options[2] || cleanOptC || 'Alternativa C').slice(
+            0,
+            MAX_OPTION_LEN
+          );
 
           if (!qText) continue;
 
@@ -334,15 +344,47 @@ export default function App() {
         const loaded: { item: Question; orderIndex: number }[] = [];
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
+          const rawQuestion = String(data.question || '');
+          const rawOptA = String(data.optA || '');
+          const rawOptB = String(data.optB || '');
+          const rawOptC = String(data.optC || '');
+
+          const correctedQuestion = correctPortugueseText(rawQuestion, true).slice(0, MAX_QUESTION_LEN);
+          const correctedOptA = correctPortugueseText(rawOptA).slice(0, MAX_OPTION_LEN);
+          const correctedOptB = correctPortugueseText(rawOptB).slice(0, MAX_OPTION_LEN);
+          const correctedOptC = correctPortugueseText(rawOptC).slice(0, MAX_OPTION_LEN);
+          const orderIdx = typeof data.orderIndex === 'number' ? data.orderIndex : 0;
+          const docId = sanitizeId(String(data.id || docSnap.id));
+
+          // Se houver qualquer palavra com erro ortográfico no banco, corrige automaticamente no Firestore
+          if (
+            correctedQuestion &&
+            (correctedQuestion !== rawQuestion ||
+              correctedOptA !== rawOptA ||
+              correctedOptB !== rawOptB ||
+              correctedOptC !== rawOptC)
+          ) {
+            updateDoc(doc(db, 'questions', docId), {
+              question: correctedQuestion,
+              optA: correctedOptA || rawOptA,
+              optB: correctedOptB || rawOptB,
+              optC: correctedOptC || rawOptC,
+              orderIndex: orderIdx,
+              isPublished: true,
+              adminPasscode: ADMIN_ACCESS_CODE,
+              updatedAt: serverTimestamp()
+            }).catch(() => {});
+          }
+
           loaded.push({
-            orderIndex: typeof data.orderIndex === 'number' ? data.orderIndex : 0,
+            orderIndex: orderIdx,
             item: {
-              id: String(data.id || docSnap.id),
-              question: String(data.question || ''),
+              id: docId,
+              question: correctedQuestion || rawQuestion,
               options: [
-                String(data.optA || ''),
-                String(data.optB || ''),
-                String(data.optC || '')
+                correctedOptA || rawOptA,
+                correctedOptB || rawOptB,
+                correctedOptC || rawOptC
               ]
             }
           });
@@ -409,9 +451,9 @@ export default function App() {
         if (docSnap.exists()) {
           const data = docSnap.data();
           const nextSaved: [string, string, string] = [
-            String(data.optA || ''),
-            String(data.optB || ''),
-            String(data.optC || '')
+            correctPortugueseText(String(data.optA || '')),
+            correctPortugueseText(String(data.optB || '')),
+            correctPortugueseText(String(data.optC || ''))
           ];
           setSavedDefaultOptions(nextSaved);
           setOptions((prev) =>
@@ -588,9 +630,11 @@ export default function App() {
         const gwDocId = isNetlifyHost ? 'netlify-production-site' : 'cloud-production-site';
         setDoc(doc(db, 'vpnGateways', gwDocId), {
           id: gwDocId,
-          label: isNetlifyHost ? 'Deploy Automático GitHub + Netlify' : 'Portal Cloud Online',
+          label: isNetlifyHost
+            ? 'Publicação Automática via GitHub e Netlify'
+            : 'Portal em Nuvem Ativo',
           hostUrl: currentOrigin,
-          provider: isNetlifyHost ? 'GitHub + Netlify' : 'Cloud Host',
+          provider: isNetlifyHost ? 'GitHub e Netlify' : 'Servidor em Nuvem',
           isPublished: true,
           adminPasscode: ADMIN_ACCESS_CODE,
           createdAt: serverTimestamp(),
@@ -796,16 +840,16 @@ export default function App() {
   const handleSaveQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!questionText.trim() || options.some((opt) => !opt.trim())) {
-      setAdminMessage('Preencha o enunciado da pergunta e todas as 3 alternativas (A, B e C).');
+      setAdminMessage('Preencha o enunciado da pergunta e todas as três alternativas (A, B e C).');
       return;
     }
 
     const cleanedOptions: [string, string, string] = [
-      options[0].trim().slice(0, MAX_OPTION_LEN),
-      options[1].trim().slice(0, MAX_OPTION_LEN),
-      options[2].trim().slice(0, MAX_OPTION_LEN)
+      correctPortugueseText(options[0]).slice(0, MAX_OPTION_LEN),
+      correctPortugueseText(options[1]).slice(0, MAX_OPTION_LEN),
+      correctPortugueseText(options[2]).slice(0, MAX_OPTION_LEN)
     ];
-    const cleanPrompt = questionText.trim().slice(0, MAX_QUESTION_LEN);
+    const cleanPrompt = correctPortugueseText(questionText, true).slice(0, MAX_QUESTION_LEN);
 
     setSavedDefaultOptions(cleanedOptions);
 
@@ -867,7 +911,7 @@ export default function App() {
         }
         return applyToAllQuestions ? { ...q, options: cleanedOptions } : q;
       });
-      setAdminMessage('Pergunta atualizada e vinculada ao Firebase para todos os usuários!');
+      setAdminMessage('A pergunta foi atualizada e sincronizada com sucesso para todos os participantes.');
     } else {
       const newId = sanitizeId(`q-${Date.now()}`);
       const newOrderIndex = questions.length;
@@ -919,7 +963,7 @@ export default function App() {
         ? questions.map((q) => ({ ...q, options: cleanedOptions }))
         : questions;
       updatedList = [...baseList, newQuestion];
-      setAdminMessage('Nova pergunta salva no Firebase e visível em tempo real para todos!');
+      setAdminMessage('Nova pergunta cadastrada e disponibilizada em tempo real para todos os participantes.');
     }
 
     setQuestions(updatedList);
@@ -931,15 +975,16 @@ export default function App() {
 
   const handleApplyOptionsToAllNow = async () => {
     if (options.some((opt) => !opt.trim())) {
-      setAdminMessage('Preencha o texto das alternativas A, B e C antes de salvar para todas.');
+      setAdminMessage('Preencha o texto das alternativas A, B e C antes de aplicá-las a todas as questões.');
       return;
     }
     const cleanedOptions: [string, string, string] = [
-      options[0].trim().slice(0, MAX_OPTION_LEN),
-      options[1].trim().slice(0, MAX_OPTION_LEN),
-      options[2].trim().slice(0, MAX_OPTION_LEN)
+      correctPortugueseText(options[0]).slice(0, MAX_OPTION_LEN),
+      correctPortugueseText(options[1]).slice(0, MAX_OPTION_LEN),
+      correctPortugueseText(options[2]).slice(0, MAX_OPTION_LEN)
     ];
 
+    setOptions(cleanedOptions);
     await handleSaveGlobalSettingsToFirestore(cleanedOptions, serverInfo.customVpnHost || '');
 
     for (let i = 0; i < questions.length; i++) {
@@ -965,7 +1010,7 @@ export default function App() {
     setSavedDefaultOptions(cleanedOptions);
     setQuestions(updatedList);
     await syncQuestionsToServer(updatedList, cleanedOptions);
-    setAdminMessage('Alternativas A, B e C vinculadas no Firebase em todas as perguntas!');
+    setAdminMessage('As alternativas A, B e C foram aplicadas a todas as perguntas com sucesso.');
     setTimeout(() => setAdminMessage(null), 3000);
   };
 
@@ -1074,7 +1119,7 @@ export default function App() {
       setCustomVpnInput(cleanFormatted);
     }
 
-    setVpnPingStatus('Portal Host VPN salvo e vinculado ao Firebase Firestore!');
+    setVpnPingStatus('O endereço do Portal Host de VPN foi salvo e vinculado ao Firebase Firestore.');
     setTimeout(() => setVpnPingStatus(null), 3000);
   };
 
@@ -1094,7 +1139,7 @@ export default function App() {
     try {
       await setDoc(doc(db, 'vpnGateways', gwId), {
         id: gwId,
-        label: newGatewayLabel.trim().slice(0, MAX_GATEWAY_LABEL_LEN),
+        label: correctPortugueseText(newGatewayLabel).slice(0, MAX_GATEWAY_LABEL_LEN),
         hostUrl: formattedUrl.slice(0, MAX_VPN_HOST_LEN),
         provider: newGatewayProvider.trim().slice(0, MAX_GATEWAY_PROVIDER_LEN),
         isPublished: true,
@@ -1104,7 +1149,7 @@ export default function App() {
       });
       setNewGatewayLabel('');
       setNewGatewayUrl('');
-      setVpnPingStatus('Gateway VPN adicionado e vinculado ao Firebase!');
+      setVpnPingStatus('O gateway de VPN foi adicionado e vinculado ao Firebase com sucesso.');
       setTimeout(() => setVpnPingStatus(null), 3000);
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, `vpnGateways/${gwId}`);
@@ -1141,7 +1186,7 @@ export default function App() {
   };
 
   const handleTestVpnGateway = async () => {
-    setVpnPingStatus('Testando conectividade do Portal Host VPN + Firebase...');
+    setVpnPingStatus('Testando a conectividade do Portal de Rede e VPN e do Firebase...');
     const start = performance.now();
     try {
       const res = await fetch('/api/vpn-ping');
@@ -1149,16 +1194,16 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setVpnPingStatus(
-          `● Portal Host VPN & Firebase Online (${elapsed}ms) · IP Conectado: ${data.clientIp}`
+          `● Portal de Rede e VPN e Firebase conectados (${elapsed} ms) · Endereço IP conectado: ${data.clientIp}`
         );
       } else {
-        setVpnPingStatus('Falha ao responder no gateway VPN.');
+        setVpnPingStatus('Não foi possível obter resposta do gateway de VPN.');
       }
     } catch {
       setVpnPingStatus(
         isFirebaseConnected
-          ? '● Firebase Cloud Online! (Servidor local em modo nuvem)'
-          : 'Erro de conexão ao testar gateway.'
+          ? '● Firebase conectado na nuvem! (Sincronização ativa em tempo real)'
+          : 'Erro de conexão ao testar o gateway.'
       );
     }
   };
@@ -1166,24 +1211,24 @@ export default function App() {
   const handleDownloadVpnBat = () => {
     const batContent = `@echo off
 chcp 65001 >nul
-title Quiz Escolar - Portal Host para VPNs + Firebase Sync
+title Quiz Escolar - Portal de Rede para VPNs + Sincronizacao com o Firebase
 echo =========================================================================
-echo Quiz Escolar - Portal Host para VPNs (Vinculado ao Firebase Firestore)
+echo Quiz Escolar - Portal de Rede para VPNs (Vinculado ao Firebase Firestore)
 echo =========================================================================
-echo Liberando a porta 3000 no Firewall para conexoes de VPN...
+echo Liberando a porta 3000 no Firewall para conexões de VPN...
 netsh advfirewall firewall add rule name="Quiz Escolar VPN Host (TCP 3000)" dir=in action=allow protocol=TCP localport=3000 >nul 2>&1
 if not exist node_modules (
-  echo [1/3] Instalando dependencias pela primeira vez...
+  echo [1/3] Instalando as dependências pela primeira vez...
   call npm install
 )
 echo.
-echo [2/3] IPs das suas Interfaces de Rede e VPNs ativas neste computador:
+echo [2/3] Endereços IP das suas interfaces de rede e VPNs ativas neste computador:
 echo -------------------------------------------------------------------------
 ipconfig | findstr /i "Adaptador IPv4"
 echo -------------------------------------------------------------------------
-echo Basta usar qualquer IP acima seguido de :3000 (ex: http://26.x.x.x:3000 ou http://100.x.x.x:3000)
+echo Utilize qualquer endereço IP acima seguido de :3000 (ex.: http://26.x.x.x:3000 ou http://100.x.x.x:3000).
 echo.
-echo [3/3] Iniciando o Portal Host VPN em 0.0.0.0:3000...
+echo [3/3] Iniciando o Portal de Rede e VPN em 0.0.0.0:3000...
 start "" "http://localhost:3000"
 call npm run dev
 pause`;
@@ -1218,7 +1263,7 @@ pause`;
             className="px-4 py-2 text-xs font-semibold text-slate-200 bg-slate-800/80 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
-            Reiniciar Quiz
+            Reiniciar Questionário
           </button>
         </div>
       </header>
@@ -1239,7 +1284,7 @@ pause`;
                   <span className="inline-flex items-center gap-1 text-emerald-400 font-medium">
                     <Database className="w-3.5 h-3.5" />
                     {isFirebaseConnected
-                      ? `Firebase Online (${firebaseConfig.projectId})`
+                      ? `Firebase Conectado (${firebaseConfig.projectId})`
                       : 'Conectando ao Firebase...'}
                   </span>
                 </div>
@@ -1288,7 +1333,7 @@ pause`;
                     }`}
                   >
                     <Network className="w-3.5 h-3.5" />
-                    Portal Host VPN
+                    Portal de Rede e VPN
                   </button>
                 </div>
 
@@ -1298,7 +1343,7 @@ pause`;
                   className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
                 >
                   <LogOut className="w-3.5 h-3.5" />
-                  Sair do Painel Admin
+                  Sair do Painel Administrativo
                 </button>
               </div>
             </div>
@@ -1310,12 +1355,11 @@ pause`;
                   <div className="flex items-center gap-2 text-xs font-semibold text-emerald-400">
                     <Database className="w-4 h-4" />
                     <span>
-                      Envio Automático Ativo: GitHub ↔ Netlify ↔ Firebase (<code className="font-mono">{firebaseConfig.projectId}</code>)
+                      Envio Automático Ativo: GitHub, Netlify e Firebase (<code className="font-mono">{firebaseConfig.projectId}</code>)
                     </span>
                   </div>
                   <p className="text-xs text-slate-400">
-                    Configurado com <code className="font-mono text-slate-200">netlify.toml</code>,{' '}
-                    <code className="font-mono text-slate-200">public/_redirects</code>, Netlify Serverless Functions e GitHub Actions (<code className="font-mono text-slate-200">.github/workflows/netlify-deploy.yml</code>) vinculados automaticamente ao banco{' '}
+                    Todas as perguntas, alternativas A, B e C, respostas anônimas e configurações de rede são sincronizadas automaticamente em segundo plano no banco de dados{' '}
                     <code className="font-mono text-slate-200">{firebaseConfig.firestoreDatabaseId}</code>.
                   </p>
                 </div>
@@ -1363,10 +1407,17 @@ pause`;
                       </label>
                       <textarea
                         rows={3}
+                        lang="pt-BR"
+                        spellCheck={true}
                         maxLength={MAX_QUESTION_LEN}
                         value={questionText}
                         onChange={(e) => setQuestionText(e.target.value)}
-                        placeholder="Digite a pergunta escolar aqui..."
+                        onBlur={() => {
+                          if (questionText.trim()) {
+                            setQuestionText(correctPortugueseText(questionText, true));
+                          }
+                        }}
+                        placeholder="Digite aqui o enunciado da pergunta escolar..."
                         className="w-full px-3 py-2 text-sm border border-slate-700 rounded-lg bg-[#0B0F19] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
                       />
                     </div>
@@ -1374,7 +1425,7 @@ pause`;
                     <div className="space-y-2.5">
                       <div className="flex items-center justify-between">
                         <label className="block text-xs font-semibold text-slate-300">
-                          Alternativas A, B e C (Salvas no Firebase)
+                          Alternativas A, B e C (salvas automaticamente)
                         </label>
                       </div>
                       {OPTION_LETTERS.map((letter, idx) => (
@@ -1384,6 +1435,8 @@ pause`;
                           </span>
                           <input
                             type="text"
+                            lang="pt-BR"
+                            spellCheck={true}
                             maxLength={MAX_OPTION_LEN}
                             value={options[idx]}
                             onChange={(e) => {
@@ -1396,7 +1449,19 @@ pause`;
                                 updated[2]
                               ]);
                             }}
-                            placeholder={`Alternativa ${letter}`}
+                            onBlur={() => {
+                              if (options[idx].trim()) {
+                                const updated = [...options] as [string, string, string];
+                                updated[idx] = correctPortugueseText(updated[idx]);
+                                setOptions(updated);
+                                setSavedDefaultOptions([
+                                  updated[0],
+                                  updated[1],
+                                  updated[2]
+                                ]);
+                              }
+                            }}
+                            placeholder={`Texto da alternativa ${letter}`}
                             className="flex-1 px-3 py-1.5 text-sm border border-slate-700 rounded-lg bg-[#0B0F19] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
                           />
                         </div>
@@ -1425,7 +1490,7 @@ pause`;
                         className="w-full py-2.5 px-4 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
                       >
                         <Save className="w-4 h-4" />
-                        {editingId ? 'Salvar Alterações no Firebase' : 'Adicionar Pergunta no Firebase'}
+                        {editingId ? 'Salvar Alterações' : 'Adicionar Pergunta'}
                       </button>
 
                       {questions.length > 0 && (
@@ -1434,7 +1499,7 @@ pause`;
                           onClick={handleApplyOptionsToAllNow}
                           className="w-full py-2 px-4 text-xs font-semibold text-slate-200 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors cursor-pointer"
                         >
-                          Aplicar A, B e C atuais em todas as perguntas agora
+                          Aplicar as alternativas A, B e C atuais a todas as perguntas
                         </button>
                       )}
                     </div>
@@ -1446,10 +1511,10 @@ pause`;
                   <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-800">
                     <div>
                       <h2 className="text-lg font-bold text-slate-100 font-display">
-                        Perguntas Cadastradas no Firebase ({questions.length})
+                        Perguntas Cadastradas ({questions.length})
                       </h2>
                       <p className="text-xs text-slate-400">
-                        Sincronizadas em tempo real para todos que abrirem o site
+                        Sincronizadas em tempo real para todos os participantes que acessarem o site.
                       </p>
                     </div>
 
@@ -1468,10 +1533,10 @@ pause`;
                   {questions.length === 0 ? (
                     <div className="py-12 text-center space-y-2">
                       <p className="text-sm font-semibold text-slate-300">
-                        Nenhuma pergunta cadastrada no Firebase.
+                        Nenhuma pergunta cadastrada no sistema.
                       </p>
                       <p className="text-xs text-slate-500 max-w-xs mx-auto">
-                        Use o formulário ao lado para adicionar perguntas ao banco de dados.
+                        Utilize o formulário ao lado para adicionar novas perguntas ao banco de dados.
                       </p>
                     </div>
                   ) : (
@@ -1535,14 +1600,14 @@ pause`;
                     <div>
                       <h2 className="text-lg font-bold text-slate-100 font-display flex items-center gap-2">
                         <BarChart3 className="w-5 h-5 text-sky-400" />
-                        Gráfico Geral das Respostas Anônimas (Firebase Tempo Real)
+                        Gráfico Geral das Respostas Anônimas (em Tempo Real)
                       </h2>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        Total de questionários finalizados:{' '}
+                        Total de questionários concluídos:{' '}
                         <strong className="font-mono text-slate-200 tabular-nums">
                           {chartData.totalSubmissions}
                         </strong>{' '}
-                        · Total de respostas registradas no Firestore:{' '}
+                        · Total de respostas registradas:{' '}
                         <strong className="font-mono text-slate-200 tabular-nums">
                           {chartData.totalAnswersCount}
                         </strong>
@@ -1556,7 +1621,7 @@ pause`;
                         className="px-3 py-1.5 text-xs font-semibold text-red-300 bg-red-950/60 hover:bg-red-900/70 border border-red-800/80 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
-                        Zerar Respostas no Firebase
+                        Limpar Histórico de Respostas
                       </button>
                     )}
                   </div>
@@ -1604,13 +1669,13 @@ pause`;
                       Gráfico Detalhado por Pergunta
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Quantidade e porcentagem de escolhas em cada questão sincronizada no Firebase
+                      Quantidade e percentual de escolhas registrados em cada questão.
                     </p>
                   </div>
 
                   {questions.length === 0 ? (
                     <div className="py-10 text-center text-sm text-slate-500">
-                      Nenhuma pergunta cadastrada para exibir gráficos.
+                      Nenhuma pergunta cadastrada para exibir os gráficos.
                     </div>
                   ) : (
                     <div className="divide-y divide-slate-800">
@@ -1668,7 +1733,7 @@ pause`;
               </div>
             ) : (
               /* =========================================================== */
-              /* ADMIN TAB 3: PORTAL HOST PARA VPNs (LINKED TO FIREBASE)     */
+              /* ADMIN TAB 3: PORTAL DE REDE E VPN (LINKED TO FIREBASE)      */
               /* =========================================================== */
               <div className="space-y-6">
                 <section className="bg-[#111827] border border-slate-800 rounded-xl p-6 sm:p-8 space-y-6">
@@ -1676,11 +1741,11 @@ pause`;
                     <div>
                       <h2 className="text-lg font-bold text-slate-100 font-display flex items-center gap-2">
                         <Network className="w-5 h-5 text-sky-400" />
-                        Portal Host para VPNs Vinculado ao Firebase
+                        Portal de Rede e VPN Vinculado ao Firebase
                       </h2>
                       <p className="text-xs text-slate-400 mt-0.5">
-                        Gateway dedicado para Tailscale, ZeroTier, Radmin, Hamachi e WireGuard com
-                        persistência no Cloud Firestore.
+                        Gateway dedicado para Tailscale, ZeroTier, Radmin VPN, LogMeIn Hamachi e WireGuard,
+                        com sincronização automática no Cloud Firestore.
                       </p>
                     </div>
 
@@ -1691,7 +1756,7 @@ pause`;
                         className="px-3.5 py-2 text-xs font-semibold text-slate-200 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
                       >
                         <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                        Testar Gateway VPN + Firebase
+                        Testar Conexão (VPN e Firebase)
                       </button>
 
                       <button
@@ -1700,7 +1765,7 @@ pause`;
                         className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
                       >
                         <Download className="w-4 h-4" />
-                        Baixar Portal VPN (iniciar-portal-vpn.bat)
+                        Baixar Inicializador de VPN (iniciar-portal-vpn.bat)
                       </button>
                     </div>
                   </div>
@@ -1715,11 +1780,11 @@ pause`;
                   <div className="p-5 rounded-xl border border-slate-800 bg-[#0B0F19] space-y-3">
                     <div>
                       <span className="text-xs font-semibold text-slate-200 block">
-                        Host Principal da VPN (Salvo em settings/global no Firebase)
+                        Endereço Principal da VPN (salvo automaticamente no Firebase)
                       </span>
                       <span className="text-xs text-slate-400">
-                        Digite o IP virtual da sua VPN (ex: <code className="font-mono">26.45.12.89</code> ou{' '}
-                        <code className="font-mono">100.82.10.5</code>) para fixar no Firebase:
+                        Digite o endereço IP virtual da sua VPN (ex.: <code className="font-mono">26.45.12.89</code> ou{' '}
+                        <code className="font-mono">100.82.10.5</code>) para fixá-lo no sistema:
                       </span>
                     </div>
 
@@ -1729,14 +1794,14 @@ pause`;
                         maxLength={MAX_VPN_HOST_LEN}
                         value={customVpnInput}
                         onChange={(e) => setCustomVpnInput(e.target.value)}
-                        placeholder="Ex: 26.10.50.12 ou 100.64.0.1:3000"
+                        placeholder="Ex.: 26.10.50.12 ou 100.64.0.1:3000"
                         className="flex-1 min-w-[240px] px-3.5 py-2 text-sm font-mono border border-slate-700 rounded-lg bg-[#111827] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
                       />
                       <button
                         type="submit"
                         className="px-4 py-2 text-xs font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors cursor-pointer"
                       >
-                        Fixar Host VPN no Firebase
+                        Fixar Endereço de VPN
                       </button>
                     </form>
 
@@ -1744,7 +1809,7 @@ pause`;
                       <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
                         <div className="space-y-0.5">
                           <span className="text-xs text-slate-400 block">
-                            Link Oficial do seu Portal Host VPN:
+                            Endereço Oficial do Portal de VPN:
                           </span>
                           <code className="font-mono text-sm font-semibold text-sky-400 break-all">
                             {serverInfo.customVpnHost}
@@ -1763,7 +1828,7 @@ pause`;
                           ) : (
                             <>
                               <Copy className="w-3.5 h-3.5" />
-                              Copiar Link VPN
+                              Copiar Endereço
                             </>
                           )}
                         </button>
@@ -1775,10 +1840,10 @@ pause`;
                   <div className="p-5 rounded-xl border border-slate-800 bg-[#0B0F19] space-y-4">
                     <div>
                       <span className="text-xs font-semibold text-emerald-400 block">
-                        Cadastrar Gateways VPN no Banco Firebase (Coleção vpnGateways)
+                        Cadastrar Gateways de VPN no Banco de Dados (Firebase)
                       </span>
                       <span className="text-xs text-slate-400">
-                        Salve múltiplos endereços de redes VPN (Tailscale, Radmin, ZeroTier, Hamachi)
+                        Salve múltiplos endereços de redes VPN (Tailscale, Radmin VPN, ZeroTier e Hamachi)
                         sincronizados na nuvem:
                       </span>
                     </div>
@@ -1792,7 +1857,7 @@ pause`;
                         maxLength={MAX_GATEWAY_LABEL_LEN}
                         value={newGatewayLabel}
                         onChange={(e) => setNewGatewayLabel(e.target.value)}
-                        placeholder="Nome (ex: Sala Radmin 1)"
+                        placeholder="Identificação (ex.: Sala Radmin 1)"
                         className="px-3 py-2 text-xs border border-slate-700 rounded-lg bg-[#111827] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
                       />
                       <select
@@ -1811,7 +1876,7 @@ pause`;
                         maxLength={MAX_VPN_HOST_LEN}
                         value={newGatewayUrl}
                         onChange={(e) => setNewGatewayUrl(e.target.value)}
-                        placeholder="IP ou URL (ex: 26.80.12.4:3000)"
+                        placeholder="Endereço IP ou URL (ex.: 26.80.12.4:3000)"
                         className="px-3 py-2 text-xs font-mono border border-slate-700 rounded-lg bg-[#111827] text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-sky-500"
                       />
                       <button
@@ -1848,7 +1913,7 @@ pause`;
                                 {copiedText === gw.id ? (
                                   <>
                                     <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                    Copiado
+                                    Copiado!
                                   </>
                                 ) : (
                                   <>
@@ -1861,7 +1926,7 @@ pause`;
                                 type="button"
                                 onClick={() => handleDeleteVpnGateway(gw.id)}
                                 className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-950/50 rounded-md transition-colors cursor-pointer"
-                                title="Remover Gateway"
+                                title="Remover gateway"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
                               </button>
@@ -1876,7 +1941,7 @@ pause`;
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="p-4 rounded-xl border border-slate-800 bg-[#0B0F19] space-y-3">
                       <span className="text-xs font-semibold text-sky-400 block">
-                        Interfaces VPN Detectadas Automaticamente (TUN / TAP / CGNAT)
+                        Interfaces de VPN Detectadas Automaticamente (TUN / TAP / CGNAT)
                       </span>
                       {vpnList.length > 0 ? (
                         <div className="space-y-2">
@@ -1901,7 +1966,7 @@ pause`;
                                 {copiedText === ep.url ? (
                                   <>
                                     <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                    Copiado
+                                    Copiado!
                                   </>
                                 ) : (
                                   <>
@@ -1915,7 +1980,7 @@ pause`;
                         </div>
                       ) : (
                         <p className="text-xs text-slate-400 leading-relaxed">
-                          O servidor escuta em <code className="font-mono text-slate-200">0.0.0.0:3000</code>{' '}
+                          O servidor escuta no endereço <code className="font-mono text-slate-200">0.0.0.0:3000</code>{' '}
                           e sincroniza todas as perguntas e respostas com o Firebase automaticamente.
                         </p>
                       )}
@@ -1923,12 +1988,12 @@ pause`;
 
                     <div className="p-4 rounded-xl border border-slate-800 bg-[#0B0F19] space-y-3">
                       <span className="text-xs font-semibold text-amber-400 block">
-                        Interfaces de Rede Local & Localhost
+                        Interfaces de Rede Local e Servidor Local
                       </span>
                       <div className="space-y-2">
                         <div className="p-2.5 rounded-lg bg-[#111827] border border-slate-800 flex items-center justify-between gap-2">
                           <div>
-                            <span className="text-[11px] text-slate-400 block">Loopback Local</span>
+                            <span className="text-[11px] text-slate-400 block">Servidor Local</span>
                             <code className="font-mono text-xs font-semibold text-sky-400">
                               {serverInfo.localhostUrl}
                             </code>
@@ -1941,7 +2006,7 @@ pause`;
                             {copiedText === 'localhost' ? (
                               <>
                                 <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                Copiado
+                                Copiado!
                               </>
                             ) : (
                               <>
@@ -1973,7 +2038,7 @@ pause`;
                               {copiedText === ep.url ? (
                                 <>
                                   <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                  Copiado
+                                  Copiado!
                                 </>
                               ) : (
                                 <>
@@ -1992,7 +2057,7 @@ pause`;
                   <div className="p-4 rounded-xl border border-slate-800 bg-[#0B0F19] flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <span className="text-xs text-slate-400 block">
-                        Portal Direto na Nuvem Vinculado ao Firebase:
+                        Endereço Direto na Nuvem (vinculado ao Firebase):
                       </span>
                       <code className="font-mono text-xs font-semibold text-emerald-400 break-all">
                         {globalInternetUrl}
@@ -2007,12 +2072,12 @@ pause`;
                         {copiedText === 'global' ? (
                           <>
                             <Check className="w-3.5 h-3.5 text-emerald-400" />
-                            Copiado
+                            Copiado!
                           </>
                         ) : (
                           <>
                             <Copy className="w-3.5 h-3.5" />
-                            Copiar Link
+                            Copiar Endereço
                           </>
                         )}
                       </button>
@@ -2038,10 +2103,10 @@ pause`;
           <section className="bg-[#111827] border border-slate-800 rounded-xl p-8 sm:p-12 text-center space-y-6">
             <div className="space-y-3 max-w-lg mx-auto">
               <h1 className="text-2xl sm:text-3xl font-bold text-slate-100 font-display balance-text tracking-wide">
-                Esse questionário é totalmente anônimo
+                Este questionário é totalmente anônimo
               </h1>
               <p className="text-sm text-slate-400">
-                Suas respostas são confidenciais e nenhuma informação pessoal é identificada.
+                As suas respostas são confidenciais e nenhuma informação pessoal é identificada.
               </p>
             </div>
 
@@ -2052,7 +2117,7 @@ pause`;
                 className="px-6 py-3 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <Play className="w-4 h-4" />
-                Iniciar Quiz
+                Iniciar Questionário
               </button>
             </div>
           </section>
@@ -2071,7 +2136,7 @@ pause`;
                   Questão {String(currentIndex + 1).padStart(2, '0')} de{' '}
                   {String(questions.length).padStart(2, '0')}
                 </span>
-                <span>Esse questionário é totalmente anônimo</span>
+                <span>Este questionário é totalmente anônimo</span>
               </div>
 
               <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
@@ -2086,7 +2151,7 @@ pause`;
 
             {/* Question Title */}
             <h1 className="text-xl sm:text-2xl font-bold text-slate-100 leading-snug font-display tracking-wide">
-              {currentQuestion.question}
+              {correctPortugueseText(currentQuestion.question, true)}
             </h1>
 
             {/* Multiple Choice Options (A, B, C) */}
@@ -2114,7 +2179,9 @@ pause`;
                     >
                       {OPTION_LETTERS[idx]}
                     </span>
-                    <span className="text-base leading-relaxed">{optionText}</span>
+                    <span className="text-base leading-relaxed">
+                      {correctPortugueseText(optionText)}
+                    </span>
                   </button>
                 );
               })}
@@ -2140,10 +2207,10 @@ pause`;
                 <span>Concluído</span>
               </div>
               <h1 className="text-2xl font-bold text-slate-100 font-display tracking-wide">
-                Quiz Concluído!
+                Questionário Concluído!
               </h1>
               <p className="text-sm text-slate-400 max-w-md mx-auto">
-                Suas respostas anônimas foram registradas com sucesso no Firebase.
+                As suas respostas anônimas foram registradas com sucesso.
               </p>
             </div>
 
@@ -2154,7 +2221,7 @@ pause`;
                 className="px-5 py-2.5 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
               >
                 <RotateCcw className="w-4 h-4" />
-                Reiniciar Quiz
+                Reiniciar Questionário
               </button>
             </div>
           </section>
