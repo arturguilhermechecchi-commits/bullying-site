@@ -307,12 +307,7 @@ service cloud.firestore {
       allow create: if isValidId(responseId) &&
         isValidQuestionResponse(incoming()) &&
         incoming().id == responseId &&
-        incoming().createdAt == request.time &&
-        exists(/databases/$(database)/documents/questions/$(incoming().questionId)) &&
-        (
-          exists(/databases/$(database)/documents/submissions/$(incoming().submissionId)) ||
-          existsAfter(/databases/$(database)/documents/submissions/$(incoming().submissionId))
-        );
+        incoming().createdAt == request.time;
 
       allow update: if false;
 

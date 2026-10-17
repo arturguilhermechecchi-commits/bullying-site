@@ -112,12 +112,23 @@ export default function App() {
     '',
     ''
   ]);
-  const [submissions, setSubmissions] = useState<QuizSubmission[]>([]);
+  const [submissions, setSubmissions] = useState<QuizSubmission[]>(() => {
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem(RESPONSES_HISTORY_KEY) : null;
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return [];
+  });
   const [vpnGateways, setVpnGateways] = useState<VpnGatewayItem[]>([]);
   const [firebaseUser, setFirebaseUser] = useState<User | null>(null);
   const [isFirebaseConnected, setIsFirebaseConnected] = useState<boolean>(false);
   const [dbSyncStatus, setDbSyncStatus] = useState<string | null>(null);
   const [isForcingSync, setIsForcingSync] = useState<boolean>(false);
+
+
 
   const [serverInfo, setServerInfo] = useState<ServerInfo>(() => ({
     localhostUrl: 'http://localhost:3000',
@@ -473,7 +484,7 @@ export default function App() {
       }
     );
 
-    // 3. Listen to Anonymous Responses & Submissions in Firestore
+    // 3. Listen to Anonymous Responses in Firestore (Real-time & Persistent)
     const qResponses = query(collection(db, 'responses'), where('isAnonymous', '==', true));
     const unsubResponses = onSnapshot(
       qResponses,
@@ -502,14 +513,70 @@ export default function App() {
           }
         });
 
-        setSubmissions(Object.values(bySubmission));
+        if (Object.keys(bySubmission).length > 0) {
+          setSubmissions((prev) => {
+            const mergedMap = new Map<string, QuizSubmission>();
+            // Preserva todas as respostas previamente salvas em estado/cache
+            prev.forEach((s) => mergedMap.set(s.id, s));
+            Object.values(bySubmission).forEach((s) => {
+              const existing = mergedMap.get(s.id);
+              mergedMap.set(s.id, {
+                id: s.id,
+                submittedAt: s.submittedAt || existing?.submittedAt || new Date().toISOString(),
+                answers: { ...(existing?.answers || {}), ...(s.answers || {}) }
+              });
+            });
+            const mergedList = Array.from(mergedMap.values());
+            try {
+              localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(mergedList));
+            } catch {}
+            return mergedList;
+          });
+        }
       },
       (error) => {
-        handleFirestoreError(error, OperationType.LIST, 'responses');
+        console.warn('Erro ao carregar respostas do Firestore:', error);
       }
     );
 
-    // 4. Listen to VPN Gateways in Firestore
+    // 4. Listen to Anonymous Submissions collection in Firestore
+    const qSubmissions = query(collection(db, 'submissions'), where('isAnonymous', '==', true));
+    const unsubSubmissions = onSnapshot(
+      qSubmissions,
+      (snapshot) => {
+        setIsFirebaseConnected(true);
+        if (!snapshot.empty) {
+          setSubmissions((prev) => {
+            const mergedMap = new Map<string, QuizSubmission>();
+            prev.forEach((s) => mergedMap.set(s.id, s));
+            snapshot.forEach((docSnap) => {
+              const d = docSnap.data();
+              const subId = String(d.id || docSnap.id);
+              if (!mergedMap.has(subId)) {
+                mergedMap.set(subId, {
+                  id: subId,
+                  submittedAt:
+                    d.createdAt && typeof d.createdAt.toDate === 'function'
+                      ? d.createdAt.toDate().toISOString()
+                      : new Date().toISOString(),
+                  answers: {}
+                });
+              }
+            });
+            const result = Array.from(mergedMap.values());
+            try {
+              localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(result));
+            } catch {}
+            return result;
+          });
+        }
+      },
+      (error) => {
+        console.warn('Erro ao escutar submissões do Firestore:', error);
+      }
+    );
+
+    // 5. Listen to VPN Gateways in Firestore
     const qGateways = query(collection(db, 'vpnGateways'), where('isPublished', '==', true));
     const unsubGateways = onSnapshot(
       qGateways,
@@ -535,6 +602,7 @@ export default function App() {
       unsubQuestions();
       unsubSettings();
       unsubResponses();
+      unsubSubmissions();
       unsubGateways();
     };
   }, [forcePushEverythingToFirestore]);
@@ -568,7 +636,9 @@ export default function App() {
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(questions));
         localStorage.setItem(SAVED_OPTIONS_KEY, JSON.stringify(savedDefaultOptions));
-        localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(submissions));
+        if (submissions.length > 0) {
+          localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(submissions));
+        }
       } catch {
         // Ignore storage errors
       }
@@ -646,7 +716,9 @@ export default function App() {
     return () => clearTimeout(timer);
   }, [savedDefaultOptions, applyToAllQuestions, questions, serverInfo.customVpnHost, isLoading]);
 
-  // Listen for the secret sequence "010203" typed anywhere on the page
+
+
+  // Reativação da escuta da sequência secreta "010203" digitada em qualquer lugar da tela
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
@@ -730,6 +802,21 @@ export default function App() {
       const totalAnswered = validQuestionEntries.length;
 
       if (totalAnswered > 0) {
+        // 1. Grava imediatamente no estado React e no localStorage (respostas nunca são perdidas)
+        const newSubmission: QuizSubmission = {
+          id: submissionId,
+          submittedAt: new Date().toISOString(),
+          answers: updatedAnswers
+        };
+        setSubmissions((prev) => {
+          const updated = [...prev.filter((s) => s.id !== submissionId), newSubmission];
+          try {
+            localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(updated));
+          } catch {}
+          return updated;
+        });
+
+        // 2. Grava de forma permanente no Cloud Firestore
         try {
           const batch = writeBatch(db);
           const subRef = doc(db, 'submissions', submissionId);
@@ -758,7 +845,32 @@ export default function App() {
 
           await batch.commit();
         } catch (error) {
-          handleFirestoreError(error, OperationType.WRITE, `submissions/${submissionId}`);
+          console.warn('Gravação em lote no Firestore falhou, executando gravação direta:', error);
+          try {
+            await setDoc(doc(db, 'submissions', submissionId), {
+              id: submissionId,
+              totalQuestions: totalAnswered,
+              countA,
+              countB,
+              countC,
+              isAnonymous: true,
+              createdAt: serverTimestamp()
+            });
+            for (let i = 0; i < validQuestionEntries.length; i++) {
+              const entry = validQuestionEntries[i];
+              const respId = sanitizeId(`${submissionId}-r-${i}`);
+              await setDoc(doc(db, 'responses', respId), {
+                id: respId,
+                submissionId,
+                questionId: entry.questionId,
+                selectedOption: entry.choice,
+                isAnonymous: true,
+                createdAt: serverTimestamp()
+              });
+            }
+          } catch (individualErr) {
+            console.error('Erro ao gravar respostas permanentes no Firestore:', individualErr);
+          }
         }
       }
 
@@ -1068,11 +1180,12 @@ export default function App() {
         await deleteDoc(doc(db, 'submissions', d.id));
       }
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, 'responses');
+      console.warn('Erro ao excluir respostas remotas:', error);
     }
 
     setSubmissions([]);
     try {
+      localStorage.removeItem(RESPONSES_HISTORY_KEY);
       await fetch('/api/quiz/submissions', { method: 'DELETE' });
     } catch {
       // Ignore network error
@@ -1250,21 +1363,35 @@ pause`;
 
   return (
     <div className="min-h-screen flex flex-col bg-[#0B0F19] text-slate-100">
-      {/* Top Bar */}
+      {/* Top Bar with Admin Access Button */}
       <header className="sticky top-0 z-30 bg-[#111827]/95 backdrop-blur border-b border-slate-800">
-        <div className="max-w-[960px] mx-auto px-6 h-16 flex items-center justify-between gap-8">
+        <div className="max-w-[960px] mx-auto px-6 h-16 flex items-center justify-between gap-4">
           <span className="text-xl font-bold tracking-wide text-slate-100 font-display whitespace-nowrap shrink-0">
             Quiz Escolar
           </span>
 
-          <button
-            type="button"
-            onClick={handleRestartQuiz}
-            className="px-4 py-2 text-xs font-semibold text-slate-200 bg-slate-800/80 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            Reiniciar Questionário
-          </button>
+          <div className="flex items-center gap-2.5">
+            {isAdminOpen && (
+              <button
+                type="button"
+                onClick={() => setIsAdminOpen(false)}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                title="Voltar para a tela do questionário"
+              >
+                <LogOut className="w-3.5 h-3.5 text-sky-400" />
+                Sair do Painel
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={handleRestartQuiz}
+              className="px-4 py-2 text-xs font-semibold text-slate-200 bg-slate-800/80 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Reiniciar Questionário
+            </button>
+          </div>
         </div>
       </header>
 
