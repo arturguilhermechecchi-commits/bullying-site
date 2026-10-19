@@ -1506,8 +1506,8 @@ pause`;
             Quiz Escolar
           </span>
 
-          <div className="flex items-center gap-2.5">
-            {isAdminOpen && (
+          {isAdminOpen && (
+            <div className="flex items-center gap-2.5">
               <button
                 type="button"
                 onClick={() => setIsAdminOpen(false)}
@@ -1517,17 +1517,8 @@ pause`;
                 <LogOut className="w-3.5 h-3.5 text-sky-400" />
                 Sair do Painel
               </button>
-            )}
-
-            <button
-              type="button"
-              onClick={handleRestartQuiz}
-              className="px-4 py-2 text-xs font-semibold text-slate-200 bg-slate-800/80 border border-slate-700 rounded-lg hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2 cursor-pointer"
-            >
-              <RotateCcw className="w-3.5 h-3.5" />
-              Reiniciar Questionário
-            </button>
-          </div>
+            </div>
+          )}
         </div>
       </header>
 
