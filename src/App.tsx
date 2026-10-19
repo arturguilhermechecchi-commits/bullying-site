@@ -134,7 +134,8 @@ export default function App() {
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submitStatus, setSubmitStatus] = useState<string | null>(null);
   const [isRefreshingSubmissions, setIsRefreshingSubmissions] = useState<boolean>(false);
-  const [isConfirmingClearSubmissions, setIsConfirmingClearSubmissions] = useState<boolean>(false);
+  const [isClearingSubmissions, setIsClearingSubmissions] = useState<boolean>(false);
+  const [clearSuccessStatus, setClearSuccessStatus] = useState<string | null>(null);
 
   // References to persist real-time stream data from Firestore
   const responsesBySubRef = useRef<Map<string, Record<string, number>>>(new Map());
@@ -508,19 +509,16 @@ export default function App() {
 
     // Helper function to sync merged submissions & responses reliably
     const syncCombinedSubmissions = () => {
-      setSubmissions((prev) => {
+      setSubmissions(() => {
         const merged = new Map<string, QuizSubmission>();
-        // 1. Preserve any existing submissions from memory/localStorage
-        prev.forEach((s) => merged.set(s.id, s));
 
-        // 2. Merge metadata from submissions collection
+        // 1. Merge metadata from submissions collection in Firestore
         submissionsMetaRef.current.forEach((meta, subId) => {
-          const existing = merged.get(subId);
-          const subAnswers = responsesBySubRef.current.get(subId) || existing?.answers || {};
+          const subAnswers = responsesBySubRef.current.get(subId) || {};
           merged.set(subId, {
             id: subId,
-            submittedAt: meta.submittedAt || existing?.submittedAt || new Date().toISOString(),
-            answers: { ...(existing?.answers || {}), ...subAnswers },
+            submittedAt: meta.submittedAt || new Date().toISOString(),
+            answers: subAnswers,
             countA: meta.countA,
             countB: meta.countB,
             countC: meta.countC,
@@ -528,24 +526,27 @@ export default function App() {
           });
         });
 
-        // 3. Merge responses from responses collection
+        // 2. Merge responses from responses collection
         responsesBySubRef.current.forEach((answers, subId) => {
-          const existing = merged.get(subId);
-          merged.set(subId, {
-            id: subId,
-            submittedAt: existing?.submittedAt || new Date().toISOString(),
-            answers: { ...(existing?.answers || {}), ...(answers || {}) },
-            countA: existing?.countA,
-            countB: existing?.countB,
-            countC: existing?.countC,
-            totalQuestions: existing?.totalQuestions
-          });
+          if (!merged.has(subId)) {
+            merged.set(subId, {
+              id: subId,
+              submittedAt: new Date().toISOString(),
+              answers: answers || {},
+              totalQuestions: Object.keys(answers || {}).length
+            });
+          } else {
+            const existing = merged.get(subId)!;
+            existing.answers = { ...(existing.answers || {}), ...(answers || {}) };
+          }
         });
 
         const list = Array.from(merged.values());
         try {
           if (list.length > 0) {
             localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(list));
+          } else {
+            localStorage.removeItem(RESPONSES_HISTORY_KEY);
           }
         } catch {}
         return list;
@@ -558,6 +559,7 @@ export default function App() {
       qResponses,
       (snapshot) => {
         setIsFirebaseConnected(true);
+        const freshMap = new Map<string, Record<string, number>>();
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
           const subId = String(data.submissionId || '');
@@ -565,12 +567,13 @@ export default function App() {
           const selectedOption = Number(data.selectedOption);
 
           if (subId && qId && (selectedOption === 0 || selectedOption === 1 || selectedOption === 2)) {
-            if (!responsesBySubRef.current.has(subId)) {
-              responsesBySubRef.current.set(subId, {});
+            if (!freshMap.has(subId)) {
+              freshMap.set(subId, {});
             }
-            responsesBySubRef.current.get(subId)![qId] = selectedOption;
+            freshMap.get(subId)![qId] = selectedOption;
           }
         });
+        responsesBySubRef.current = freshMap;
         syncCombinedSubmissions();
       },
       (error) => {
@@ -584,10 +587,21 @@ export default function App() {
       qSubmissions,
       (snapshot) => {
         setIsFirebaseConnected(true);
+        const freshMeta = new Map<
+          string,
+          {
+            id: string;
+            submittedAt: string;
+            countA: number;
+            countB: number;
+            countC: number;
+            totalQuestions: number;
+          }
+        >();
         snapshot.forEach((docSnap) => {
           const d = docSnap.data();
           const subId = String(d.id || docSnap.id);
-          submissionsMetaRef.current.set(subId, {
+          freshMeta.set(subId, {
             id: subId,
             submittedAt:
               d.createdAt && typeof d.createdAt.toDate === 'function'
@@ -599,6 +613,7 @@ export default function App() {
             totalQuestions: typeof d.totalQuestions === 'number' ? d.totalQuestions : 0
           });
         });
+        submissionsMetaRef.current = freshMeta;
         syncCombinedSubmissions();
       },
       (error) => {
@@ -1294,37 +1309,50 @@ export default function App() {
   };
 
   const handleClearAllSubmissions = async () => {
-    if (!isConfirmingClearSubmissions) {
-      setIsConfirmingClearSubmissions(true);
-      setTimeout(() => setIsConfirmingClearSubmissions(false), 5000);
-      return;
-    }
-    setIsConfirmingClearSubmissions(false);
+    if (isClearingSubmissions) return;
+    setIsClearingSubmissions(true);
+    setClearSuccessStatus(null);
 
-    try {
-      const respQuery = query(collection(db, 'responses'), where('isAnonymous', '==', true));
-      const respSnap = await getDocs(respQuery);
-      for (const d of respSnap.docs) {
-        await deleteDoc(doc(db, 'responses', d.id));
-      }
-
-      const subQuery = query(collection(db, 'submissions'), where('isAnonymous', '==', true));
-      const subSnap = await getDocs(subQuery);
-      for (const d of subSnap.docs) {
-        await deleteDoc(doc(db, 'submissions', d.id));
-      }
-    } catch (error) {
-      console.warn('Erro ao excluir respostas remotas:', error);
-    }
-
+    // 1. Zera imediatamente todo o estado local na memória, refs e localStorage de uma vez só
     responsesBySubRef.current.clear();
     submissionsMetaRef.current.clear();
     setSubmissions([]);
     try {
       localStorage.removeItem(RESPONSES_HISTORY_KEY);
-      await fetch('/api/quiz/submissions', { method: 'DELETE' });
-    } catch {
-      // Ignore network error
+    } catch {}
+
+    // 2. Apaga todas as respostas e submissões do Firestore em lotes atômicos (writeBatch) em paralelo
+    try {
+      const respQuery = query(collection(db, 'responses'), where('isAnonymous', '==', true));
+      const subQuery = query(collection(db, 'submissions'), where('isAnonymous', '==', true));
+      const [respSnap, subSnap] = await Promise.all([getDocs(respQuery), getDocs(subQuery)]);
+
+      const allDocs = [...respSnap.docs, ...subSnap.docs];
+      const BATCH_SIZE = 400;
+      const batchPromises: Promise<void>[] = [];
+
+      for (let i = 0; i < allDocs.length; i += BATCH_SIZE) {
+        const chunk = allDocs.slice(i, i + BATCH_SIZE);
+        const batch = writeBatch(db);
+        chunk.forEach((d) => {
+          batch.delete(d.ref);
+        });
+        batchPromises.push(batch.commit());
+      }
+
+      await Promise.all(batchPromises);
+
+      // 3. Limpa também no servidor local se ativo
+      try {
+        await fetch('/api/quiz/submissions', { method: 'DELETE' });
+      } catch {}
+
+      setClearSuccessStatus('Todas as respostas foram apagadas de uma vez só com sucesso.');
+      setTimeout(() => setClearSuccessStatus(null), 4000);
+    } catch (error) {
+      console.warn('Erro ao apagar respostas em lote no Firebase:', error);
+    } finally {
+      setIsClearingSubmissions(false);
     }
   };
 
@@ -1871,7 +1899,7 @@ pause`;
                     <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        disabled={isRefreshingSubmissions}
+                        disabled={isRefreshingSubmissions || isClearingSubmissions}
                         onClick={handleRefreshSubmissionsFromFirestore}
                         className="px-3 py-1.5 text-xs font-semibold text-sky-300 bg-sky-950/60 hover:bg-sky-900/70 border border-sky-800/80 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                         title="Consultar diretamente o Firebase Firestore para atualizar os dados"
@@ -1882,24 +1910,29 @@ pause`;
                         {isRefreshingSubmissions ? 'Atualizando...' : 'Atualizar Dados do Firebase'}
                       </button>
 
-                      {submissions.length > 0 && (
+                      {(submissions.length > 0 || chartData.totalAnswersCount > 0) && (
                         <button
                           type="button"
+                          disabled={isClearingSubmissions}
                           onClick={handleClearAllSubmissions}
-                          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer border ${
-                            isConfirmingClearSubmissions
-                              ? 'text-amber-200 bg-amber-950/80 border-amber-600 animate-pulse'
-                              : 'text-red-300 bg-red-950/60 hover:bg-red-900/70 border-red-800/80'
-                          }`}
+                          className="px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer border text-red-300 bg-red-950/60 hover:bg-red-900/70 border-red-800/80 disabled:opacity-50"
+                          title="Apagar todas as respostas de uma vez só"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          {isConfirmingClearSubmissions
-                            ? 'Clique novamente para confirmar a exclusão'
-                            : 'Limpar Histórico de Respostas'}
+                          <Trash2 className={`w-3.5 h-3.5 ${isClearingSubmissions ? 'animate-spin' : ''}`} />
+                          {isClearingSubmissions
+                            ? 'Apagando todas as respostas...'
+                            : 'Apagar Todas as Respostas de Uma Vez'}
                         </button>
                       )}
                     </div>
                   </div>
+
+                  {clearSuccessStatus && (
+                    <div className="p-3 text-xs text-emerald-300 bg-emerald-950/60 border border-emerald-800/80 rounded-lg flex items-center gap-2">
+                      <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{clearSuccessStatus}</span>
+                    </div>
+                  )}
 
                   <div className="space-y-4">
                     <span className="block text-xs font-semibold text-slate-300">
