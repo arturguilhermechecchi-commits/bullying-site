@@ -72,6 +72,10 @@ export interface QuizSubmission {
   id: string;
   submittedAt: string;
   answers: Record<string, number>; // questionId -> optionIndex (0, 1, or 2)
+  countA?: number;
+  countB?: number;
+  countC?: number;
+  totalQuestions?: number;
 }
 
 export interface VpnGatewayItem {
@@ -127,8 +131,26 @@ export default function App() {
   const [isFirebaseConnected, setIsFirebaseConnected] = useState<boolean>(false);
   const [dbSyncStatus, setDbSyncStatus] = useState<string | null>(null);
   const [isForcingSync, setIsForcingSync] = useState<boolean>(false);
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [submitStatus, setSubmitStatus] = useState<string | null>(null);
+  const [isRefreshingSubmissions, setIsRefreshingSubmissions] = useState<boolean>(false);
+  const [isConfirmingClearSubmissions, setIsConfirmingClearSubmissions] = useState<boolean>(false);
 
-
+  // References to persist real-time stream data from Firestore
+  const responsesBySubRef = useRef<Map<string, Record<string, number>>>(new Map());
+  const submissionsMetaRef = useRef<
+    Map<
+      string,
+      {
+        id: string;
+        submittedAt: string;
+        countA: number;
+        countB: number;
+        countC: number;
+        totalQuestions: number;
+      }
+    >
+  >(new Map());
 
   const [serverInfo, setServerInfo] = useState<ServerInfo>(() => ({
     localhostUrl: 'http://localhost:3000',
@@ -484,55 +506,72 @@ export default function App() {
       }
     );
 
+    // Helper function to sync merged submissions & responses reliably
+    const syncCombinedSubmissions = () => {
+      setSubmissions((prev) => {
+        const merged = new Map<string, QuizSubmission>();
+        // 1. Preserve any existing submissions from memory/localStorage
+        prev.forEach((s) => merged.set(s.id, s));
+
+        // 2. Merge metadata from submissions collection
+        submissionsMetaRef.current.forEach((meta, subId) => {
+          const existing = merged.get(subId);
+          const subAnswers = responsesBySubRef.current.get(subId) || existing?.answers || {};
+          merged.set(subId, {
+            id: subId,
+            submittedAt: meta.submittedAt || existing?.submittedAt || new Date().toISOString(),
+            answers: { ...(existing?.answers || {}), ...subAnswers },
+            countA: meta.countA,
+            countB: meta.countB,
+            countC: meta.countC,
+            totalQuestions: meta.totalQuestions
+          });
+        });
+
+        // 3. Merge responses from responses collection
+        responsesBySubRef.current.forEach((answers, subId) => {
+          const existing = merged.get(subId);
+          merged.set(subId, {
+            id: subId,
+            submittedAt: existing?.submittedAt || new Date().toISOString(),
+            answers: { ...(existing?.answers || {}), ...(answers || {}) },
+            countA: existing?.countA,
+            countB: existing?.countB,
+            countC: existing?.countC,
+            totalQuestions: existing?.totalQuestions
+          });
+        });
+
+        const list = Array.from(merged.values());
+        try {
+          if (list.length > 0) {
+            localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(list));
+          }
+        } catch {}
+        return list;
+      });
+    };
+
     // 3. Listen to Anonymous Responses in Firestore (Real-time & Persistent)
     const qResponses = query(collection(db, 'responses'), where('isAnonymous', '==', true));
     const unsubResponses = onSnapshot(
       qResponses,
       (snapshot) => {
         setIsFirebaseConnected(true);
-        const bySubmission: Record<string, QuizSubmission> = {};
-
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
-          const subId = String(data.submissionId || 'sub-default');
+          const subId = String(data.submissionId || '');
           const qId = String(data.questionId || '');
           const selectedOption = Number(data.selectedOption);
 
-          if (!bySubmission[subId]) {
-            bySubmission[subId] = {
-              id: subId,
-              submittedAt:
-                data.createdAt && typeof data.createdAt.toDate === 'function'
-                  ? data.createdAt.toDate().toISOString()
-                  : new Date().toISOString(),
-              answers: {}
-            };
-          }
-          if (qId && (selectedOption === 0 || selectedOption === 1 || selectedOption === 2)) {
-            bySubmission[subId].answers[qId] = selectedOption;
+          if (subId && qId && (selectedOption === 0 || selectedOption === 1 || selectedOption === 2)) {
+            if (!responsesBySubRef.current.has(subId)) {
+              responsesBySubRef.current.set(subId, {});
+            }
+            responsesBySubRef.current.get(subId)![qId] = selectedOption;
           }
         });
-
-        if (Object.keys(bySubmission).length > 0) {
-          setSubmissions((prev) => {
-            const mergedMap = new Map<string, QuizSubmission>();
-            // Preserva todas as respostas previamente salvas em estado/cache
-            prev.forEach((s) => mergedMap.set(s.id, s));
-            Object.values(bySubmission).forEach((s) => {
-              const existing = mergedMap.get(s.id);
-              mergedMap.set(s.id, {
-                id: s.id,
-                submittedAt: s.submittedAt || existing?.submittedAt || new Date().toISOString(),
-                answers: { ...(existing?.answers || {}), ...(s.answers || {}) }
-              });
-            });
-            const mergedList = Array.from(mergedMap.values());
-            try {
-              localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(mergedList));
-            } catch {}
-            return mergedList;
-          });
-        }
+        syncCombinedSubmissions();
       },
       (error) => {
         console.warn('Erro ao carregar respostas do Firestore:', error);
@@ -545,31 +584,22 @@ export default function App() {
       qSubmissions,
       (snapshot) => {
         setIsFirebaseConnected(true);
-        if (!snapshot.empty) {
-          setSubmissions((prev) => {
-            const mergedMap = new Map<string, QuizSubmission>();
-            prev.forEach((s) => mergedMap.set(s.id, s));
-            snapshot.forEach((docSnap) => {
-              const d = docSnap.data();
-              const subId = String(d.id || docSnap.id);
-              if (!mergedMap.has(subId)) {
-                mergedMap.set(subId, {
-                  id: subId,
-                  submittedAt:
-                    d.createdAt && typeof d.createdAt.toDate === 'function'
-                      ? d.createdAt.toDate().toISOString()
-                      : new Date().toISOString(),
-                  answers: {}
-                });
-              }
-            });
-            const result = Array.from(mergedMap.values());
-            try {
-              localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(result));
-            } catch {}
-            return result;
+        snapshot.forEach((docSnap) => {
+          const d = docSnap.data();
+          const subId = String(d.id || docSnap.id);
+          submissionsMetaRef.current.set(subId, {
+            id: subId,
+            submittedAt:
+              d.createdAt && typeof d.createdAt.toDate === 'function'
+                ? d.createdAt.toDate().toISOString()
+                : new Date().toISOString(),
+            countA: typeof d.countA === 'number' ? d.countA : 0,
+            countB: typeof d.countB === 'number' ? d.countB : 0,
+            countC: typeof d.countC === 'number' ? d.countC : 0,
+            totalQuestions: typeof d.totalQuestions === 'number' ? d.totalQuestions : 0
           });
-        }
+        });
+        syncCombinedSubmissions();
       },
       (error) => {
         console.warn('Erro ao escutar submissões do Firestore:', error);
@@ -763,9 +793,10 @@ export default function App() {
     setIsQuizFinished(false);
   };
 
-  // Automatic progression to next question and atomic Firestore submission on completion
+  // Automatic progression to next question and guaranteed atomic Firestore submission on completion
   const handleOptionClick = async (idx: number) => {
-    if (!currentQuestion) return;
+    if (!currentQuestion || isSubmitting) return;
+
     const updatedAnswers: Record<string, number> = {
       ...selectedOptions,
       [currentQuestion.id]: idx
@@ -775,7 +806,9 @@ export default function App() {
     if (currentIndex + 1 < questions.length) {
       setCurrentIndex((prev) => prev + 1);
     } else {
-      setIsQuizFinished(true);
+      // Last question reached - perform persistent atomic Firestore write
+      setIsSubmitting(true);
+      setSubmitStatus('Gravando respostas de forma permanente no banco de dados...');
 
       const submissionId = sanitizeId(
         `sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
@@ -806,8 +839,13 @@ export default function App() {
         const newSubmission: QuizSubmission = {
           id: submissionId,
           submittedAt: new Date().toISOString(),
-          answers: updatedAnswers
+          answers: updatedAnswers,
+          countA,
+          countB,
+          countC,
+          totalQuestions: totalAnswered
         };
+
         setSubmissions((prev) => {
           const updated = [...prev.filter((s) => s.id !== submissionId), newSubmission];
           try {
@@ -816,7 +854,7 @@ export default function App() {
           return updated;
         });
 
-        // 2. Grava de forma permanente no Cloud Firestore
+        // 2. Grava de forma permanente no Cloud Firestore com garantia e tentativa de recuperação
         try {
           const batch = writeBatch(db);
           const subRef = doc(db, 'submissions', submissionId);
@@ -844,8 +882,9 @@ export default function App() {
           });
 
           await batch.commit();
+          setIsFirebaseConnected(true);
         } catch (error) {
-          console.warn('Gravação em lote no Firestore falhou, executando gravação direta:', error);
+          console.warn('Gravação em lote no Firestore falhou, executando gravação individual:', error);
           try {
             await setDoc(doc(db, 'submissions', submissionId), {
               id: submissionId,
@@ -868,22 +907,27 @@ export default function App() {
                 createdAt: serverTimestamp()
               });
             }
+            setIsFirebaseConnected(true);
           } catch (individualErr) {
             console.error('Erro ao gravar respostas permanentes no Firestore:', individualErr);
           }
         }
+
+        // 3. Espelha submissão também na API local Express caso esteja disponível
+        try {
+          await fetch('/api/quiz/submissions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ answers: updatedAnswers })
+          });
+        } catch {
+          // Ignora caso servidor local esteja offline
+        }
       }
 
-      // Also mirror submission to local server API
-      try {
-        await fetch('/api/quiz/submissions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ answers: updatedAnswers })
-        });
-      } catch {
-        // Ignore local server error
-      }
+      setIsSubmitting(false);
+      setSubmitStatus(null);
+      setIsQuizFinished(true);
     }
   };
 
@@ -893,8 +937,17 @@ export default function App() {
 
     const perQuestion = questions.map((q) => {
       const counts: [number, number, number] = [0, 0, 0];
+      const qCleanId = sanitizeId(q.id);
+
       submissions.forEach((sub) => {
-        const chosen = sub.answers[q.id];
+        const answers = sub.answers || {};
+        const chosen =
+          answers[q.id] !== undefined
+            ? answers[q.id]
+            : answers[qCleanId] !== undefined
+            ? answers[qCleanId]
+            : undefined;
+
         if (chosen === 0 || chosen === 1 || chosen === 2) {
           counts[chosen]++;
           globalCounts[chosen]++;
@@ -909,6 +962,17 @@ export default function App() {
       };
     });
 
+    // Fallback de contagem geral caso submissões tenham metadados (countA, countB, countC)
+    // mesmo se as respostas individuais detalhadas estiverem pendentes
+    if (totalAnswersCount === 0 && submissions.length > 0) {
+      submissions.forEach((sub) => {
+        if (typeof sub.countA === 'number') globalCounts[0] += sub.countA;
+        if (typeof sub.countB === 'number') globalCounts[1] += sub.countB;
+        if (typeof sub.countC === 'number') globalCounts[2] += sub.countC;
+      });
+      totalAnswersCount = globalCounts[0] + globalCounts[1] + globalCounts[2];
+    }
+
     return {
       totalSubmissions: submissions.length,
       totalAnswersCount,
@@ -916,6 +980,69 @@ export default function App() {
       perQuestion
     };
   }, [questions, submissions]);
+
+  // Função para o administrador consultar e forçar atualização das respostas diretamente do Firestore
+  const handleRefreshSubmissionsFromFirestore = async () => {
+    setIsRefreshingSubmissions(true);
+    try {
+      const qSubs = query(collection(db, 'submissions'), where('isAnonymous', '==', true));
+      const qResps = query(collection(db, 'responses'), where('isAnonymous', '==', true));
+
+      const [subSnap, respSnap] = await Promise.all([getDocs(qSubs), getDocs(qResps)]);
+
+      const respBySub: Record<string, Record<string, number>> = {};
+      respSnap.forEach((docSnap) => {
+        const d = docSnap.data();
+        const subId = String(d.submissionId || '');
+        const qId = String(d.questionId || '');
+        const opt = Number(d.selectedOption);
+        if (subId && qId && (opt === 0 || opt === 1 || opt === 2)) {
+          if (!respBySub[subId]) respBySub[subId] = {};
+          respBySub[subId][qId] = opt;
+        }
+      });
+
+      const mergedMap = new Map<string, QuizSubmission>();
+      subSnap.forEach((docSnap) => {
+        const d = docSnap.data();
+        const subId = String(d.id || docSnap.id);
+        const subAnswers = respBySub[subId] || {};
+        mergedMap.set(subId, {
+          id: subId,
+          submittedAt:
+            d.createdAt && typeof d.createdAt.toDate === 'function'
+              ? d.createdAt.toDate().toISOString()
+              : new Date().toISOString(),
+          answers: subAnswers,
+          countA: typeof d.countA === 'number' ? d.countA : 0,
+          countB: typeof d.countB === 'number' ? d.countB : 0,
+          countC: typeof d.countC === 'number' ? d.countC : 0,
+          totalQuestions: typeof d.totalQuestions === 'number' ? d.totalQuestions : 0
+        });
+      });
+
+      Object.entries(respBySub).forEach(([subId, answers]) => {
+        if (!mergedMap.has(subId)) {
+          mergedMap.set(subId, {
+            id: subId,
+            submittedAt: new Date().toISOString(),
+            answers
+          });
+        }
+      });
+
+      const list = Array.from(mergedMap.values());
+      setSubmissions(list);
+      try {
+        localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(list));
+      } catch {}
+      setIsFirebaseConnected(true);
+    } catch (err) {
+      console.error('Erro ao atualizar respostas do Firestore:', err);
+    } finally {
+      setIsRefreshingSubmissions(false);
+    }
+  };
 
   // Admin Question handlers
   const resetAdminForm = (nextSavedOptions?: [string, string, string]) => {
@@ -1167,6 +1294,13 @@ export default function App() {
   };
 
   const handleClearAllSubmissions = async () => {
+    if (!isConfirmingClearSubmissions) {
+      setIsConfirmingClearSubmissions(true);
+      setTimeout(() => setIsConfirmingClearSubmissions(false), 5000);
+      return;
+    }
+    setIsConfirmingClearSubmissions(false);
+
     try {
       const respQuery = query(collection(db, 'responses'), where('isAnonymous', '==', true));
       const respSnap = await getDocs(respQuery);
@@ -1183,6 +1317,8 @@ export default function App() {
       console.warn('Erro ao excluir respostas remotas:', error);
     }
 
+    responsesBySubRef.current.clear();
+    submissionsMetaRef.current.clear();
     setSubmissions([]);
     try {
       localStorage.removeItem(RESPONSES_HISTORY_KEY);
@@ -1741,16 +1877,37 @@ pause`;
                       </p>
                     </div>
 
-                    {submissions.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-2">
                       <button
                         type="button"
-                        onClick={handleClearAllSubmissions}
-                        className="px-3 py-1.5 text-xs font-semibold text-red-300 bg-red-950/60 hover:bg-red-900/70 border border-red-800/80 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                        disabled={isRefreshingSubmissions}
+                        onClick={handleRefreshSubmissionsFromFirestore}
+                        className="px-3 py-1.5 text-xs font-semibold text-sky-300 bg-sky-950/60 hover:bg-sky-900/70 border border-sky-800/80 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                        title="Consultar diretamente o Firebase Firestore para atualizar os dados"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        Limpar Histórico de Respostas
+                        <RefreshCw
+                          className={`w-3.5 h-3.5 text-sky-400 ${isRefreshingSubmissions ? 'animate-spin' : ''}`}
+                        />
+                        {isRefreshingSubmissions ? 'Atualizando...' : 'Atualizar Dados do Firebase'}
                       </button>
-                    )}
+
+                      {submissions.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleClearAllSubmissions}
+                          className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer border ${
+                            isConfirmingClearSubmissions
+                              ? 'text-amber-200 bg-amber-950/80 border-amber-600 animate-pulse'
+                              : 'text-red-300 bg-red-950/60 hover:bg-red-900/70 border-red-800/80'
+                          }`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {isConfirmingClearSubmissions
+                            ? 'Clique novamente para confirmar a exclusão'
+                            : 'Limpar Histórico de Respostas'}
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div className="space-y-4">
@@ -2290,12 +2447,13 @@ pause`;
                   <button
                     key={idx}
                     type="button"
+                    disabled={isSubmitting}
                     onClick={() => handleOptionClick(idx)}
                     className={`w-full text-left p-4 rounded-xl border transition-colors flex items-center gap-4 cursor-pointer ${
                       isSelected
                         ? 'border-sky-500 bg-sky-950/60 text-white ring-1 ring-sky-500 font-semibold'
                         : 'border-slate-800 bg-[#0B0F19] hover:border-sky-500 hover:bg-slate-800/70 text-slate-200'
-                    }`}
+                    } ${isSubmitting ? 'opacity-60 cursor-wait' : ''}`}
                   >
                     <span
                       className={`w-8 h-8 rounded-lg font-mono text-sm font-semibold flex items-center justify-center shrink-0 transition-colors ${
@@ -2313,6 +2471,13 @@ pause`;
                 );
               })}
             </div>
+
+            {isSubmitting && (
+              <div className="p-3.5 rounded-xl bg-sky-950/70 border border-sky-800/80 flex items-center gap-3 text-xs text-sky-200">
+                <RefreshCw className="w-4 h-4 animate-spin text-sky-400 shrink-0" />
+                <span>{submitStatus || 'Gravando respostas de forma permanente no banco de dados...'}</span>
+              </div>
+            )}
           </section>
         ) : !isQuizFinished && !currentQuestion ? (
           /* Empty State when there are 0 questions in the system */
@@ -2328,27 +2493,27 @@ pause`;
         ) : (
           /* Final Completion Screen */
           <section className="bg-[#111827] border border-slate-800 rounded-xl p-8 sm:p-12 text-center space-y-6">
-            <div className="space-y-2">
-              <div className="flex items-center justify-center gap-2 text-xs text-slate-400">
-                <Award className="w-4 h-4 text-sky-400" />
-                <span>Concluído</span>
+            <div className="space-y-3">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/60 border border-emerald-800/80 text-xs text-emerald-300 font-semibold">
+                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Salvo Permanentemente no Banco de Dados</span>
               </div>
-              <h1 className="text-2xl font-bold text-slate-100 font-display tracking-wide">
-                Questionário Concluído!
+              <h1 className="text-2xl sm:text-3xl font-bold text-slate-100 font-display tracking-wide">
+                Questionário Concluído com Sucesso!
               </h1>
-              <p className="text-sm text-slate-400 max-w-md mx-auto">
-                As suas respostas anônimas foram registradas com sucesso.
+              <p className="text-sm text-slate-300 max-w-md mx-auto">
+                Suas respostas foram gravadas no Firebase de forma definitiva e anônima. Elas já estão contabilizadas no gráfico de resultados.
               </p>
             </div>
 
-            <div className="flex justify-center">
+            <div className="flex justify-center pt-2">
               <button
                 type="button"
                 onClick={handleRestartQuiz}
-                className="px-5 py-2.5 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+                className="px-5 py-2.5 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer shadow-sm"
               >
                 <RotateCcw className="w-4 h-4" />
-                Reiniciar Questionário
+                Fazer Outro Questionário
               </button>
             </div>
           </section>

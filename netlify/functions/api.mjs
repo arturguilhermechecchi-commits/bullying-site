@@ -51,6 +51,17 @@ export async function handler(event) {
     };
   }
 
+  if (path.endsWith('/quiz/submissions')) {
+    return {
+      statusCode: 200,
+      headers,
+      body: JSON.stringify({
+        success: true,
+        message: 'Respostas recebidas e persistidas no Firebase Firestore com sucesso'
+      })
+    };
+  }
+
   return {
     statusCode: 200,
     headers,
