@@ -127,7 +127,8 @@ service cloud.firestore {
           'countB',
           'countC',
           'isAnonymous',
-          'createdAt'
+          'createdAt',
+          'turma'
         ]) &&
         isValidId(data.id) &&
         data.totalQuestions is int && data.totalQuestions >= 1 && data.totalQuestions <= 500 &&
@@ -136,6 +137,7 @@ service cloud.firestore {
         data.countC is int && data.countC >= 0 && data.countC <= 500 &&
         (data.countA + data.countB + data.countC == data.totalQuestions) &&
         data.isAnonymous is bool && data.isAnonymous == true &&
+        (!('turma' in data) || (data.turma is string && data.turma.size() >= 1 && data.turma.size() <= 20)) &&
         data.createdAt is timestamp;
     }
 
@@ -154,13 +156,15 @@ service cloud.firestore {
           'questionId',
           'selectedOption',
           'isAnonymous',
-          'createdAt'
+          'createdAt',
+          'turma'
         ]) &&
         isValidId(data.id) &&
         isValidId(data.submissionId) &&
         isValidId(data.questionId) &&
         data.selectedOption is int && data.selectedOption >= 0 && data.selectedOption <= 2 &&
         data.isAnonymous is bool && data.isAnonymous == true &&
+        (!('turma' in data) || (data.turma is string && data.turma.size() >= 1 && data.turma.size() <= 20)) &&
         data.createdAt is timestamp;
     }
 

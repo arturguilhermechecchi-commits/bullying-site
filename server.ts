@@ -14,6 +14,7 @@ interface QuizSubmission {
   id: string;
   submittedAt: string;
   answers: Record<string, number>;
+  turma?: string;
 }
 
 interface StoreData {
@@ -236,13 +237,14 @@ async function startServer() {
   // Record a new anonymous quiz submission from any user
   app.post('/api/quiz/submissions', (req, res) => {
     const store = loadStore();
-    const { answers } = req.body;
+    const { answers, turma } = req.body;
 
     if (answers && typeof answers === 'object') {
       const newSub: QuizSubmission = {
         id: `sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         submittedAt: new Date().toISOString(),
-        answers
+        answers,
+        turma: typeof turma === 'string' && turma.trim() ? turma.trim().slice(0, 20) : undefined
       };
       store.submissions.push(newSub);
       saveStore(store);

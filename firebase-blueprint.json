@@ -171,6 +171,12 @@
           "type": "boolean",
           "description": "Always true to guarantee anonymous submission."
         },
+        "turma": {
+          "type": "string",
+          "description": "Chosen class/grade option (e.g., 6a, 7a, 1a, 1c, 2a, etc.)",
+          "minLength": 1,
+          "maxLength": 20
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",
@@ -221,6 +227,12 @@
         "isAnonymous": {
           "type": "boolean",
           "description": "Always true to guarantee anonymous response."
+        },
+        "turma": {
+          "type": "string",
+          "description": "Chosen class/grade option (e.g., 6a, 7a, 1a, 1c, 2a, etc.)",
+          "minLength": 1,
+          "maxLength": 20
         },
         "createdAt": {
           "type": "string",

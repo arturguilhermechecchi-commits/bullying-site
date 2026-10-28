@@ -25,7 +25,11 @@ import {
   Activity,
   Database,
   RefreshCw,
-  LogIn
+  LogIn,
+  Users,
+  CheckCircle2,
+  AlertCircle,
+  Filter
 } from 'lucide-react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { INITIAL_QUESTIONS, Question } from './data/questions';
@@ -68,6 +72,43 @@ const MAX_VPN_HOST_LEN = 256;
 const MAX_GATEWAY_LABEL_LEN = 120;
 const MAX_GATEWAY_PROVIDER_LEN = 80;
 
+export const TURMA_OPTIONS = [
+  '6a',
+  '7a',
+  '1a',
+  '1c',
+  '2a',
+  '2b',
+  '2d',
+  '2c',
+  '2e',
+  '3a',
+  '3b',
+  '3c',
+  '3d'
+] as const;
+export type TurmaOption = (typeof TURMA_OPTIONS)[number];
+
+export function formatTurmaLabel(turma: string): string {
+  const t = (turma || '').toLowerCase().trim();
+  const map: Record<string, string> = {
+    '6a': '6º Ano A (6a)',
+    '7a': '7º Ano A (7a)',
+    '1a': '1º Ano A (1a)',
+    '1c': '1º Ano C (1c)',
+    '2a': '2º Ano A (2a)',
+    '2b': '2º Ano B (2b)',
+    '2d': '2º Ano D (2d)',
+    '2c': '2º Ano C (2c)',
+    '2e': '2º Ano E (2e)',
+    '3a': '3º Ano A (3a)',
+    '3b': '3º Ano B (3b)',
+    '3c': '3º Ano C (3c)',
+    '3d': '3º Ano D (3d)'
+  };
+  return map[t] || (turma ? turma.toUpperCase() : 'Não informada');
+}
+
 export interface QuizSubmission {
   id: string;
   submittedAt: string;
@@ -76,6 +117,7 @@ export interface QuizSubmission {
   countB?: number;
   countC?: number;
   totalQuestions?: number;
+  turma?: string;
 }
 
 export interface VpnGatewayItem {
@@ -137,8 +179,26 @@ export default function App() {
   const [isClearingSubmissions, setIsClearingSubmissions] = useState<boolean>(false);
   const [clearSuccessStatus, setClearSuccessStatus] = useState<string | null>(null);
 
-  // References to persist real-time stream data from Firestore
-  const responsesBySubRef = useRef<Map<string, Record<string, number>>>(new Map());
+  // References to persist real-time stream data from Firestore, pre-seeded from cache for instant loading
+  const responsesBySubRef = useRef<Map<string, Record<string, number>>>(
+    (() => {
+      const map = new Map<string, Record<string, number>>();
+      try {
+        const raw = typeof window !== 'undefined' ? localStorage.getItem(RESPONSES_HISTORY_KEY) : null;
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((sub: QuizSubmission) => {
+              if (sub && sub.id && sub.answers && Object.keys(sub.answers).length > 0) {
+                map.set(sub.id, sub.answers);
+              }
+            });
+          }
+        }
+      } catch {}
+      return map;
+    })()
+  );
   const submissionsMetaRef = useRef<
     Map<
       string,
@@ -149,9 +209,61 @@ export default function App() {
         countB: number;
         countC: number;
         totalQuestions: number;
+        turma?: string;
       }
     >
-  >(new Map());
+  >(
+    (() => {
+      const map = new Map<
+        string,
+        {
+          id: string;
+          submittedAt: string;
+          countA: number;
+          countB: number;
+          countC: number;
+          totalQuestions: number;
+          turma?: string;
+        }
+      >();
+      try {
+        const raw = typeof window !== 'undefined' ? localStorage.getItem(RESPONSES_HISTORY_KEY) : null;
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            parsed.forEach((sub: QuizSubmission) => {
+              if (sub && sub.id) {
+                let countA = typeof sub.countA === 'number' ? sub.countA : 0;
+                let countB = typeof sub.countB === 'number' ? sub.countB : 0;
+                let countC = typeof sub.countC === 'number' ? sub.countC : 0;
+                const answers = sub.answers || {};
+                if (countA === 0 && countB === 0 && countC === 0 && Object.keys(answers).length > 0) {
+                  Object.values(answers).forEach((val) => {
+                    if (val === 0) countA++;
+                    if (val === 1) countB++;
+                    if (val === 2) countC++;
+                  });
+                }
+                map.set(sub.id, {
+                  id: sub.id,
+                  submittedAt: sub.submittedAt || new Date().toISOString(),
+                  countA,
+                  countB,
+                  countC,
+                  totalQuestions:
+                    typeof sub.totalQuestions === 'number' && sub.totalQuestions > 0
+                      ? sub.totalQuestions
+                      : Object.keys(answers).length,
+                  turma: sub.turma
+                });
+              }
+            });
+          }
+        }
+      } catch {}
+      return map;
+    })()
+  );
 
   const [serverInfo, setServerInfo] = useState<ServerInfo>(() => ({
     localhostUrl: 'http://localhost:3000',
@@ -507,26 +619,93 @@ export default function App() {
       }
     );
 
-    // Helper function to sync merged submissions & responses reliably
+    // Fast fetch from local server store on boot to merge any responses saved on localhost/LAN immediately
+    fetch('/api/quiz')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((serverData) => {
+        if (serverData && Array.isArray(serverData.submissions) && serverData.submissions.length > 0) {
+          let hasNew = false;
+          serverData.submissions.forEach((s: QuizSubmission) => {
+            if (s && s.id) {
+              const answers = s.answers || {};
+              if (!responsesBySubRef.current.has(s.id) && Object.keys(answers).length > 0) {
+                responsesBySubRef.current.set(s.id, answers);
+                hasNew = true;
+              }
+              if (!submissionsMetaRef.current.has(s.id)) {
+                let countA = 0;
+                let countB = 0;
+                let countC = 0;
+                Object.values(answers).forEach((val) => {
+                  if (val === 0) countA++;
+                  if (val === 1) countB++;
+                  if (val === 2) countC++;
+                });
+                submissionsMetaRef.current.set(s.id, {
+                  id: s.id,
+                  submittedAt: s.submittedAt || new Date().toISOString(),
+                  countA,
+                  countB,
+                  countC,
+                  totalQuestions: Object.keys(answers).length,
+                  turma: s.turma
+                });
+                hasNew = true;
+              }
+            }
+          });
+          if (hasNew) {
+            syncCombinedSubmissions();
+          }
+        }
+      })
+      .catch(() => {});
+
+    // Helper function to sync merged submissions & responses reliably without answer drop
     const syncCombinedSubmissions = () => {
-      setSubmissions(() => {
+      setSubmissions((prev) => {
+        // If both refs were emptied (e.g. admin clicked delete all), clear completely
+        if (submissionsMetaRef.current.size === 0 && responsesBySubRef.current.size === 0) {
+          try {
+            localStorage.removeItem(RESPONSES_HISTORY_KEY);
+          } catch {}
+          return [];
+        }
+
         const merged = new Map<string, QuizSubmission>();
 
-        // 1. Merge metadata from submissions collection in Firestore
+        // 1. Seed with previously known submissions so async snapshot delays never wipe answers
+        prev.forEach((sub) => {
+          if (
+            sub &&
+            sub.id &&
+            (submissionsMetaRef.current.has(sub.id) || responsesBySubRef.current.has(sub.id))
+          ) {
+            merged.set(sub.id, {
+              ...sub,
+              answers: { ...(sub.answers || {}) }
+            });
+          }
+        });
+
+        // 2. Merge metadata from submissions collection in Firestore
         submissionsMetaRef.current.forEach((meta, subId) => {
           const subAnswers = responsesBySubRef.current.get(subId) || {};
+          const existing = merged.get(subId);
+          const combinedAnswers = { ...(existing?.answers || {}), ...subAnswers };
           merged.set(subId, {
             id: subId,
-            submittedAt: meta.submittedAt || new Date().toISOString(),
-            answers: subAnswers,
+            submittedAt: meta.submittedAt || existing?.submittedAt || new Date().toISOString(),
+            answers: combinedAnswers,
             countA: meta.countA,
             countB: meta.countB,
             countC: meta.countC,
-            totalQuestions: meta.totalQuestions
+            totalQuestions: meta.totalQuestions,
+            turma: meta.turma || existing?.turma
           });
         });
 
-        // 2. Merge responses from responses collection
+        // 3. Merge responses from responses collection
         responsesBySubRef.current.forEach((answers, subId) => {
           if (!merged.has(subId)) {
             merged.set(subId, {
@@ -559,7 +738,13 @@ export default function App() {
       qResponses,
       (snapshot) => {
         setIsFirebaseConnected(true);
-        const freshMap = new Map<string, Record<string, number>>();
+        if (snapshot.empty && submissionsMetaRef.current.size === 0) {
+          responsesBySubRef.current.clear();
+          syncCombinedSubmissions();
+          return;
+        }
+
+        const freshMap = new Map<string, Record<string, number>>(responsesBySubRef.current);
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
           const subId = String(data.submissionId || '');
@@ -587,6 +772,12 @@ export default function App() {
       qSubmissions,
       (snapshot) => {
         setIsFirebaseConnected(true);
+        if (snapshot.empty && responsesBySubRef.current.size === 0) {
+          submissionsMetaRef.current.clear();
+          syncCombinedSubmissions();
+          return;
+        }
+
         const freshMeta = new Map<
           string,
           {
@@ -596,8 +787,9 @@ export default function App() {
             countB: number;
             countC: number;
             totalQuestions: number;
+            turma?: string;
           }
-        >();
+        >(submissionsMetaRef.current);
         snapshot.forEach((docSnap) => {
           const d = docSnap.data();
           const subId = String(d.id || docSnap.id);
@@ -610,7 +802,8 @@ export default function App() {
             countA: typeof d.countA === 'number' ? d.countA : 0,
             countB: typeof d.countB === 'number' ? d.countB : 0,
             countC: typeof d.countC === 'number' ? d.countC : 0,
-            totalQuestions: typeof d.totalQuestions === 'number' ? d.totalQuestions : 0
+            totalQuestions: typeof d.totalQuestions === 'number' ? d.totalQuestions : 0,
+            turma: typeof d.turma === 'string' && d.turma ? d.turma : undefined
           });
         });
         submissionsMetaRef.current = freshMeta;
@@ -793,6 +986,8 @@ export default function App() {
   }, [fetchServerNetworkInfo]);
 
   // Quiz state
+  const [selectedTurma, setSelectedTurma] = useState<string | null>(null);
+  const [selectedAdminTurmaFilter, setSelectedAdminTurmaFilter] = useState<string>('all');
   const [hasStartedQuiz, setHasStartedQuiz] = useState<boolean>(false);
   const [currentIndex, setCurrentIndex] = useState<number>(0);
   const [selectedOptions, setSelectedOptions] = useState<Record<string, number>>({});
@@ -802,6 +997,7 @@ export default function App() {
   const currentSelectedOption = currentQuestion ? selectedOptions[currentQuestion.id] ?? null : null;
 
   const handleRestartQuiz = () => {
+    setSelectedTurma(null);
     setHasStartedQuiz(false);
     setCurrentIndex(0);
     setSelectedOptions({});
@@ -821,10 +1017,7 @@ export default function App() {
     if (currentIndex + 1 < questions.length) {
       setCurrentIndex((prev) => prev + 1);
     } else {
-      // Last question reached - perform persistent atomic Firestore write
-      setIsSubmitting(true);
-      setSubmitStatus('Gravando respostas de forma permanente no banco de dados...');
-
+      // Last question reached - perform instant optimistic submission and non-blocking background persistence
       const submissionId = sanitizeId(
         `sub-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
       );
@@ -850,7 +1043,6 @@ export default function App() {
       const totalAnswered = validQuestionEntries.length;
 
       if (totalAnswered > 0) {
-        // 1. Grava imediatamente no estado React e no localStorage (respostas nunca são perdidas)
         const newSubmission: QuizSubmission = {
           id: submissionId,
           submittedAt: new Date().toISOString(),
@@ -858,8 +1050,21 @@ export default function App() {
           countA,
           countB,
           countC,
-          totalQuestions: totalAnswered
+          totalQuestions: totalAnswered,
+          turma: selectedTurma || undefined
         };
+
+        // 1. Immediately store in memory refs, React state, and localStorage (Instant UI & 0ms chart arrival)
+        submissionsMetaRef.current.set(submissionId, {
+          id: submissionId,
+          submittedAt: newSubmission.submittedAt,
+          countA,
+          countB,
+          countC,
+          totalQuestions: totalAnswered,
+          turma: selectedTurma || undefined
+        });
+        responsesBySubRef.current.set(submissionId, { ...updatedAnswers });
 
         setSubmissions((prev) => {
           const updated = [...prev.filter((s) => s.id !== submissionId), newSubmission];
@@ -869,82 +1074,117 @@ export default function App() {
           return updated;
         });
 
-        // 2. Grava de forma permanente no Cloud Firestore com garantia e tentativa de recuperação
-        try {
-          const batch = writeBatch(db);
-          const subRef = doc(db, 'submissions', submissionId);
-          batch.set(subRef, {
-            id: submissionId,
-            totalQuestions: totalAnswered,
-            countA,
-            countB,
-            countC,
-            isAnonymous: true,
-            createdAt: serverTimestamp()
-          });
-
-          validQuestionEntries.forEach((entry, index) => {
-            const respId = sanitizeId(`${submissionId}-r-${index}`);
-            const respRef = doc(db, 'responses', respId);
-            batch.set(respRef, {
-              id: respId,
-              submissionId,
-              questionId: entry.questionId,
-              selectedOption: entry.choice,
-              isAnonymous: true,
-              createdAt: serverTimestamp()
-            });
-          });
-
-          await batch.commit();
-          setIsFirebaseConnected(true);
-        } catch (error) {
-          console.warn('Gravação em lote no Firestore falhou, executando gravação individual:', error);
+        // 2. Concurrently persist in Cloud Firestore and local Express API in background without blocking respondent
+        (async () => {
+          const turmaVal = selectedTurma || 'não informada';
           try {
-            await setDoc(doc(db, 'submissions', submissionId), {
+            const batch = writeBatch(db);
+            const subRef = doc(db, 'submissions', submissionId);
+            batch.set(subRef, {
               id: submissionId,
               totalQuestions: totalAnswered,
               countA,
               countB,
               countC,
               isAnonymous: true,
+              turma: turmaVal,
               createdAt: serverTimestamp()
             });
-            for (let i = 0; i < validQuestionEntries.length; i++) {
-              const entry = validQuestionEntries[i];
-              const respId = sanitizeId(`${submissionId}-r-${i}`);
-              await setDoc(doc(db, 'responses', respId), {
+
+            validQuestionEntries.forEach((entry, index) => {
+              const respId = sanitizeId(`${submissionId}-r-${index}`);
+              const respRef = doc(db, 'responses', respId);
+              batch.set(respRef, {
                 id: respId,
                 submissionId,
                 questionId: entry.questionId,
                 selectedOption: entry.choice,
                 isAnonymous: true,
+                turma: turmaVal,
                 createdAt: serverTimestamp()
               });
-            }
-            setIsFirebaseConnected(true);
-          } catch (individualErr) {
-            console.error('Erro ao gravar respostas permanentes no Firestore:', individualErr);
-          }
-        }
+            });
 
-        // 3. Espelha submissão também na API local Express caso esteja disponível
-        try {
-          await fetch('/api/quiz/submissions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ answers: updatedAnswers })
-          });
-        } catch {
-          // Ignora caso servidor local esteja offline
-        }
+            await batch.commit();
+            setIsFirebaseConnected(true);
+          } catch (error) {
+            console.warn('Gravação em lote no Firestore falhou, executando gravação individual:', error);
+            try {
+              await setDoc(doc(db, 'submissions', submissionId), {
+                id: submissionId,
+                totalQuestions: totalAnswered,
+                countA,
+                countB,
+                countC,
+                isAnonymous: true,
+                turma: turmaVal,
+                createdAt: serverTimestamp()
+              });
+              for (let i = 0; i < validQuestionEntries.length; i++) {
+                const entry = validQuestionEntries[i];
+                const respId = sanitizeId(`${submissionId}-r-${i}`);
+                await setDoc(doc(db, 'responses', respId), {
+                  id: respId,
+                  submissionId,
+                  questionId: entry.questionId,
+                  selectedOption: entry.choice,
+                  isAnonymous: true,
+                  turma: turmaVal,
+                  createdAt: serverTimestamp()
+                });
+              }
+              setIsFirebaseConnected(true);
+            } catch (individualErr) {
+              console.error('Erro ao gravar respostas permanentes no Firestore:', individualErr);
+            }
+          }
+
+          // Espelha submissão também na API local Express caso disponível
+          try {
+            await fetch('/api/quiz/submissions', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ answers: updatedAnswers, turma: selectedTurma })
+            });
+          } catch {
+            // Ignora se servidor local estiver temporariamente inacessível
+          }
+        })();
       }
 
+      // Finish quiz immediately with zero waiting time
       setIsSubmitting(false);
       setSubmitStatus(null);
       setIsQuizFinished(true);
     }
   };
+
+  // Agrupamento de submissões por turma para filtragem e relatórios separados
+  const submissionsByTurma = useMemo(() => {
+    const map: Record<string, QuizSubmission[]> = {};
+    TURMA_OPTIONS.forEach((t) => {
+      map[t] = [];
+    });
+    submissions.forEach((sub) => {
+      const t = (sub.turma || '').toLowerCase().trim();
+      if (map[t]) {
+        map[t].push(sub);
+      } else {
+        if (!map['outros']) map['outros'] = [];
+        map['outros'].push(sub);
+      }
+    });
+    return map;
+  }, [submissions]);
+
+  // Submissões ativas com base no filtro selecionado no painel administrativo
+  const activeSubmissions = useMemo(() => {
+    if (selectedAdminTurmaFilter === 'all') {
+      return submissions;
+    }
+    const target = selectedAdminTurmaFilter.toLowerCase().trim();
+    return submissions.filter((s) => (s.turma || '').toLowerCase().trim() === target);
+  }, [submissions, selectedAdminTurmaFilter]);
 
   const chartData = useMemo(() => {
     const globalCounts: [number, number, number] = [0, 0, 0];
@@ -954,7 +1194,7 @@ export default function App() {
       const counts: [number, number, number] = [0, 0, 0];
       const qCleanId = sanitizeId(q.id);
 
-      submissions.forEach((sub) => {
+      activeSubmissions.forEach((sub) => {
         const answers = sub.answers || {};
         const chosen =
           answers[q.id] !== undefined
@@ -977,24 +1217,26 @@ export default function App() {
       };
     });
 
-    // Fallback de contagem geral caso submissões tenham metadados (countA, countB, countC)
-    // mesmo se as respostas individuais detalhadas estiverem pendentes
-    if (totalAnswersCount === 0 && submissions.length > 0) {
-      submissions.forEach((sub) => {
-        if (typeof sub.countA === 'number') globalCounts[0] += sub.countA;
-        if (typeof sub.countB === 'number') globalCounts[1] += sub.countB;
-        if (typeof sub.countC === 'number') globalCounts[2] += sub.countC;
-      });
-      totalAnswersCount = globalCounts[0] + globalCounts[1] + globalCounts[2];
-    }
+    // Se houver submissões com metadados (countA, countB, countC) enquanto respostas detalhadas
+    // ainda estão sendo sincronizadas pela rede, inclui nos totais globais imediatamente
+    activeSubmissions.forEach((sub) => {
+      const answers = sub.answers || {};
+      const hasDetailedAnswers = Object.keys(answers).length > 0;
+      if (!hasDetailedAnswers) {
+        if (typeof sub.countA === 'number' && sub.countA > 0) globalCounts[0] += sub.countA;
+        if (typeof sub.countB === 'number' && sub.countB > 0) globalCounts[1] += sub.countB;
+        if (typeof sub.countC === 'number' && sub.countC > 0) globalCounts[2] += sub.countC;
+        totalAnswersCount += (sub.countA || 0) + (sub.countB || 0) + (sub.countC || 0);
+      }
+    });
 
     return {
-      totalSubmissions: submissions.length,
+      totalSubmissions: activeSubmissions.length,
       totalAnswersCount,
       globalCounts,
       perQuestion
     };
-  }, [questions, submissions]);
+  }, [questions, activeSubmissions]);
 
   // Função para o administrador consultar e forçar atualização das respostas diretamente do Firestore
   const handleRefreshSubmissionsFromFirestore = async () => {
@@ -1018,21 +1260,39 @@ export default function App() {
       });
 
       const mergedMap = new Map<string, QuizSubmission>();
+      const freshMeta = new Map<
+        string,
+        {
+          id: string;
+          submittedAt: string;
+          countA: number;
+          countB: number;
+          countC: number;
+          totalQuestions: number;
+          turma?: string;
+        }
+      >();
+
       subSnap.forEach((docSnap) => {
         const d = docSnap.data();
         const subId = String(d.id || docSnap.id);
         const subAnswers = respBySub[subId] || {};
-        mergedMap.set(subId, {
+        const meta = {
           id: subId,
           submittedAt:
             d.createdAt && typeof d.createdAt.toDate === 'function'
               ? d.createdAt.toDate().toISOString()
               : new Date().toISOString(),
-          answers: subAnswers,
           countA: typeof d.countA === 'number' ? d.countA : 0,
           countB: typeof d.countB === 'number' ? d.countB : 0,
           countC: typeof d.countC === 'number' ? d.countC : 0,
-          totalQuestions: typeof d.totalQuestions === 'number' ? d.totalQuestions : 0
+          totalQuestions: typeof d.totalQuestions === 'number' ? d.totalQuestions : 0,
+          turma: typeof d.turma === 'string' && d.turma ? d.turma : undefined
+        };
+        freshMeta.set(subId, meta);
+        mergedMap.set(subId, {
+          ...meta,
+          answers: subAnswers
         });
       });
 
@@ -1041,10 +1301,14 @@ export default function App() {
           mergedMap.set(subId, {
             id: subId,
             submittedAt: new Date().toISOString(),
-            answers
+            answers,
+            totalQuestions: Object.keys(answers).length
           });
         }
       });
+
+      responsesBySubRef.current = new Map(Object.entries(respBySub));
+      submissionsMetaRef.current = freshMeta;
 
       const list = Array.from(mergedMap.values());
       setSubmissions(list);
@@ -1934,9 +2198,100 @@ pause`;
                     </div>
                   )}
 
+                  {/* Turma / Opções Filter Bar */}
+                  <div className="space-y-3 pt-1 pb-3 border-b border-slate-800">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
+                        <Filter className="w-3.5 h-3.5 text-sky-400" />
+                        Separar e Filtrar Respostas por Opção / Turma:
+                      </span>
+                      {selectedAdminTurmaFilter !== 'all' && (
+                        <button
+                          type="button"
+                          onClick={() => setSelectedAdminTurmaFilter('all')}
+                          className="text-xs text-sky-400 hover:text-sky-300 font-medium underline cursor-pointer"
+                        >
+                          Limpar filtro (Ver todas)
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedAdminTurmaFilter('all')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                          selectedAdminTurmaFilter === 'all'
+                            ? 'bg-sky-600 text-white shadow-sm shadow-sky-600/50'
+                            : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800'
+                        }`}
+                      >
+                        <span>Todas as Turmas</span>
+                        <span
+                          className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                            selectedAdminTurmaFilter === 'all'
+                              ? 'bg-sky-800 text-sky-100'
+                              : 'bg-slate-800 text-slate-400'
+                          }`}
+                        >
+                          {submissions.length}
+                        </span>
+                      </button>
+
+                      {TURMA_OPTIONS.map((turma) => {
+                        const count = (submissionsByTurma[turma] || []).length;
+                        const isSelected = selectedAdminTurmaFilter === turma;
+
+                        return (
+                          <button
+                            key={turma}
+                            type="button"
+                            onClick={() => setSelectedAdminTurmaFilter(turma)}
+                            className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
+                              isSelected
+                                ? 'bg-sky-600 text-white shadow-sm shadow-sky-600/50'
+                                : 'bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800'
+                            }`}
+                          >
+                            <span className="font-mono">{turma}</span>
+                            <span
+                              className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
+                                isSelected
+                                  ? 'bg-sky-800 text-sky-100'
+                                  : count > 0
+                                  ? 'bg-sky-950 text-sky-300 border border-sky-800/60 font-bold'
+                                  : 'bg-slate-800 text-slate-500'
+                              }`}
+                            >
+                              {count}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {selectedAdminTurmaFilter !== 'all' && (
+                      <div className="p-3 rounded-lg bg-sky-950/60 border border-sky-800/80 text-xs text-sky-200 flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0" />
+                          <span>
+                            Exibindo apenas respostas separadas da turma{' '}
+                            <strong className="text-white font-mono text-sm uppercase">
+                              {selectedAdminTurmaFilter}
+                            </strong>{' '}
+                            ({formatTurmaLabel(selectedAdminTurmaFilter)})
+                          </span>
+                        </div>
+                        <span className="font-mono text-xs bg-sky-900/60 px-2 py-0.5 rounded text-sky-200">
+                          {activeSubmissions.length} questionário(s) encontrado(s)
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="space-y-4">
                     <span className="block text-xs font-semibold text-slate-300">
-                      Distribuição Geral por Alternativa (A, B e C)
+                      Distribuição Geral por Alternativa (A, B e C) {selectedAdminTurmaFilter !== 'all' ? `· Turma ${selectedAdminTurmaFilter.toUpperCase()}` : ''}
                     </span>
 
                     <div className="space-y-3">
@@ -1974,10 +2329,10 @@ pause`;
                 <section className="bg-[#111827] border border-slate-800 rounded-xl p-6 sm:p-8 space-y-6">
                   <div>
                     <h3 className="text-lg font-bold text-slate-100 font-display">
-                      Gráfico Detalhado por Pergunta
+                      Gráfico Detalhado por Pergunta {selectedAdminTurmaFilter !== 'all' ? `· Turma ${selectedAdminTurmaFilter.toUpperCase()}` : ''}
                     </h3>
                     <p className="text-xs text-slate-400">
-                      Quantidade e percentual de escolhas registrados em cada questão.
+                      Quantidade e percentual de escolhas registrados em cada questão {selectedAdminTurmaFilter !== 'all' ? `para a turma ${selectedAdminTurmaFilter.toUpperCase()}` : 'em todas as turmas'}.
                     </p>
                   </div>
 
@@ -2037,6 +2392,105 @@ pause`;
                       ))}
                     </div>
                   )}
+                </section>
+
+                {/* Resumo Comparativo por Turma / Opção */}
+                <section className="bg-[#111827] border border-slate-800 rounded-xl p-6 sm:p-8 space-y-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <h3 className="text-lg font-bold text-slate-100 font-display flex items-center gap-2">
+                        <Users className="w-5 h-5 text-sky-400" />
+                        Resumo Geral das Respostas por Opção / Turma
+                      </h3>
+                      <p className="text-xs text-slate-400 mt-0.5">
+                        Visão comparativa de questionários e respostas computados separadamente por cada opção de turma.
+                      </p>
+                    </div>
+
+                    {selectedAdminTurmaFilter !== 'all' && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedAdminTurmaFilter('all')}
+                        className="px-3 py-1.5 text-xs text-sky-300 hover:text-white bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors cursor-pointer border border-slate-700"
+                      >
+                        Exibir Todas as Turmas
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {TURMA_OPTIONS.map((turma) => {
+                      const list = submissionsByTurma[turma] || [];
+                      const isSelected = selectedAdminTurmaFilter === turma;
+                      let tA = 0;
+                      let tB = 0;
+                      let tC = 0;
+                      list.forEach((s) => {
+                        if (typeof s.countA === 'number') tA += s.countA;
+                        if (typeof s.countB === 'number') tB += s.countB;
+                        if (typeof s.countC === 'number') tC += s.countC;
+                        if (s.answers && s.countA === undefined) {
+                          Object.values(s.answers).forEach((val) => {
+                            if (val === 0) tA++;
+                            if (val === 1) tB++;
+                            if (val === 2) tC++;
+                          });
+                        }
+                      });
+                      const totalVotes = tA + tB + tC;
+
+                      return (
+                        <div
+                          key={turma}
+                          className={`p-4 rounded-xl border transition-all flex flex-col justify-between ${
+                            isSelected
+                              ? 'bg-sky-950/80 border-sky-500 ring-2 ring-sky-500/40 shadow-md'
+                              : 'bg-[#0B0F19] border-slate-800'
+                          }`}
+                        >
+                          <div>
+                            <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                              <span className="font-mono text-lg font-bold text-slate-100 tracking-wider">
+                                {turma}
+                              </span>
+                              <span className="text-[11px] font-mono text-sky-300 font-semibold bg-sky-950 px-2 py-0.5 rounded border border-sky-800/60">
+                                {list.length} {list.length === 1 ? 'resposta' : 'respostas'}
+                              </span>
+                            </div>
+
+                            <div className="pt-2.5 space-y-1.5 text-xs">
+                              <div className="text-[11px] text-slate-400 font-medium">
+                                {formatTurmaLabel(turma).split(' (')[0]}
+                              </div>
+                              <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono">
+                                <span>Total de votos:</span>
+                                <span className="text-slate-200 font-semibold">{totalVotes}</span>
+                              </div>
+                              <div className="flex items-center justify-between text-[11px] text-slate-400 font-mono pt-1">
+                                <span className="text-emerald-400 font-semibold">A: {tA}</span>
+                                <span className="text-amber-400 font-semibold">B: {tB}</span>
+                                <span className="text-purple-400 font-semibold">C: {tC}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="pt-3.5">
+                            <button
+                              type="button"
+                              onClick={() => setSelectedAdminTurmaFilter(turma)}
+                              className={`w-full py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer text-center ${
+                                isSelected
+                                  ? 'bg-sky-600 text-white shadow-sm'
+                                  : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700/60'
+                              }`}
+                            >
+                              {isSelected ? '✓ Filtrando esta turma' : 'Filtrar esta turma'}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </section>
               </div>
             ) : (
@@ -2406,26 +2860,97 @@ pause`;
           </div>
         ) : !hasStartedQuiz ? (
           /* =============================================================== */
-          /* PRE-QUIZ ANONYMOUS NOTICE SCREEN                                */
+          /* PRE-QUIZ TURMA SELECTION & ANONYMOUS NOTICE SCREEN              */
           /* =============================================================== */
-          <section className="bg-[#111827] border border-slate-800 rounded-xl p-8 sm:p-12 text-center space-y-6">
-            <div className="space-y-3 max-w-lg mx-auto">
+          <section className="bg-[#111827] border border-slate-800 rounded-xl p-6 sm:p-10 space-y-7">
+            <div className="text-center space-y-2.5 max-w-lg mx-auto">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-sky-950/70 border border-sky-800/80 text-xs font-semibold text-sky-300">
+                <Shield className="w-3.5 h-3.5 text-sky-400" />
+                <span>Questionário Escolar 100% Anônimo</span>
+              </div>
               <h1 className="text-2xl sm:text-3xl font-bold text-slate-100 font-display balance-text tracking-wide">
-                Este questionário é totalmente anônimo
+                Identificação da Turma
               </h1>
-              <p className="text-sm text-slate-400">
-                As suas respostas são confidenciais e nenhuma informação pessoal é identificada.
+              <p className="text-xs sm:text-sm text-slate-400">
+                Selecione a sua opção/turma antes de começar para que as respostas sejam salvas e organizadas separadamente.
               </p>
+            </div>
+
+            {/* Turma Selection Grid */}
+            <div className="max-w-3xl mx-auto space-y-3">
+              <div className="flex items-center justify-between text-xs font-semibold text-slate-300 px-1">
+                <span className="flex items-center gap-1.5 text-sky-400">
+                  <Users className="w-4 h-4" />
+                  Opções Disponíveis ({TURMA_OPTIONS.length}):
+                </span>
+                <span className="text-[11px] text-slate-500">
+                  {selectedTurma ? `Opção selecionada: ${selectedTurma.toUpperCase()}` : 'Clique para escolher'}
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-2.5">
+                {TURMA_OPTIONS.map((turma) => {
+                  const isSelected = selectedTurma === turma;
+                  return (
+                    <button
+                      key={turma}
+                      type="button"
+                      onClick={() => setSelectedTurma(turma)}
+                      className={`p-3 rounded-xl border text-left transition-all cursor-pointer relative group flex flex-col justify-between ${
+                        isSelected
+                          ? 'bg-sky-950/90 border-sky-500 shadow-md shadow-sky-950 ring-2 ring-sky-500/60'
+                          : 'bg-[#0B0F19] border-slate-800 hover:border-slate-700 hover:bg-slate-900 text-slate-300'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-mono text-lg font-bold text-slate-100 tracking-wider">
+                          {turma}
+                        </span>
+                        {isSelected ? (
+                          <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0" />
+                        ) : (
+                          <span className="w-3.5 h-3.5 rounded-full border border-slate-700 group-hover:border-slate-500 transition-colors inline-block" />
+                        )}
+                      </div>
+                      <span className="text-[11px] text-slate-400 font-medium mt-1">
+                        {formatTurmaLabel(turma).split(' (')[0]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {!selectedTurma ? (
+                <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-800/60 flex items-center gap-2 text-xs text-amber-300">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-amber-400" />
+                  <span>Selecione uma das opções acima antes de iniciar o questionário.</span>
+                </div>
+              ) : (
+                <div className="p-3 rounded-xl bg-sky-950/40 border border-sky-800/60 flex items-center justify-between text-xs text-sky-300">
+                  <span className="flex items-center gap-1.5">
+                    <CheckCircle2 className="w-4 h-4 text-sky-400 shrink-0" />
+                    Opção escolhida: <strong>{selectedTurma.toUpperCase()} ({formatTurmaLabel(selectedTurma)})</strong>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTurma(null)}
+                    className="text-[11px] text-sky-400 hover:text-sky-200 underline cursor-pointer"
+                  >
+                    Trocar opção
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="flex justify-center pt-2">
               <button
                 type="button"
+                disabled={!selectedTurma}
                 onClick={() => setHasStartedQuiz(true)}
-                className="px-6 py-3 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 rounded-lg transition-colors inline-flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer"
+                className="px-7 py-3 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-40 disabled:pointer-events-none rounded-xl transition-all inline-flex items-center gap-2 whitespace-nowrap shrink-0 cursor-pointer shadow-lg shadow-sky-950"
               >
                 <Play className="w-4 h-4" />
-                Iniciar Questionário
+                {selectedTurma ? `Iniciar Questionário · Turma ${selectedTurma.toUpperCase()}` : 'Selecione uma Opção para Iniciar'}
               </button>
             </div>
           </section>
@@ -2439,11 +2964,18 @@ pause`;
           >
             {/* Progress Header */}
             <div className="space-y-2.5">
-              <div className="flex items-center justify-between gap-2 text-xs text-slate-400 font-mono tabular-nums">
-                <span className="font-semibold text-slate-200">
-                  Questão {String(currentIndex + 1).padStart(2, '0')} de{' '}
-                  {String(questions.length).padStart(2, '0')}
-                </span>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 font-mono tabular-nums">
+                <div className="flex items-center gap-2.5">
+                  <span className="font-semibold text-slate-200">
+                    Questão {String(currentIndex + 1).padStart(2, '0')} de{' '}
+                    {String(questions.length).padStart(2, '0')}
+                  </span>
+                  {selectedTurma && (
+                    <span className="px-2 py-0.5 rounded bg-sky-950/80 text-sky-300 border border-sky-800/80 font-bold tracking-wider">
+                      Turma: {selectedTurma.toUpperCase()}
+                    </span>
+                  )}
+                </div>
                 <span>Este questionário é totalmente anônimo</span>
               </div>
 
