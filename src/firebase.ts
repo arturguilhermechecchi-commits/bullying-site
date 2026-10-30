@@ -16,7 +16,8 @@ import {
   deleteDoc,
   writeBatch,
   serverTimestamp,
-  getDocs
+  getDocs,
+  getDocsFromServer
 } from 'firebase/firestore';
 import appletFirebaseConfig from '../firebase-applet-config.json';
 
@@ -147,6 +148,7 @@ export {
   writeBatch,
   serverTimestamp,
   getDocs,
+  getDocsFromServer,
   signInWithPopup,
   signOut
 };

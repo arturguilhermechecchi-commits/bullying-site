@@ -51,6 +51,7 @@ import {
   writeBatch,
   serverTimestamp,
   getDocs,
+  getDocsFromServer,
   signInWithPopup,
   signOut,
   handleFirestoreError,
@@ -177,28 +178,11 @@ export default function App() {
   const [submitStatus, setSubmitStatus] = useState<string | null>(null);
   const [isRefreshingSubmissions, setIsRefreshingSubmissions] = useState<boolean>(false);
   const [isClearingSubmissions, setIsClearingSubmissions] = useState<boolean>(false);
+  const isClearingSubmissionsRef = useRef<boolean>(false);
   const [clearSuccessStatus, setClearSuccessStatus] = useState<string | null>(null);
 
-  // References to persist real-time stream data from Firestore, pre-seeded from cache for instant loading
-  const responsesBySubRef = useRef<Map<string, Record<string, number>>>(
-    (() => {
-      const map = new Map<string, Record<string, number>>();
-      try {
-        const raw = typeof window !== 'undefined' ? localStorage.getItem(RESPONSES_HISTORY_KEY) : null;
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) {
-            parsed.forEach((sub: QuizSubmission) => {
-              if (sub && sub.id && sub.answers && Object.keys(sub.answers).length > 0) {
-                map.set(sub.id, sub.answers);
-              }
-            });
-          }
-        }
-      } catch {}
-      return map;
-    })()
-  );
+  // References to track live real-time stream data from Firestore
+  const responsesBySubRef = useRef<Map<string, Record<string, number>>>(new Map());
   const submissionsMetaRef = useRef<
     Map<
       string,
@@ -212,58 +196,7 @@ export default function App() {
         turma?: string;
       }
     >
-  >(
-    (() => {
-      const map = new Map<
-        string,
-        {
-          id: string;
-          submittedAt: string;
-          countA: number;
-          countB: number;
-          countC: number;
-          totalQuestions: number;
-          turma?: string;
-        }
-      >();
-      try {
-        const raw = typeof window !== 'undefined' ? localStorage.getItem(RESPONSES_HISTORY_KEY) : null;
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) {
-            parsed.forEach((sub: QuizSubmission) => {
-              if (sub && sub.id) {
-                let countA = typeof sub.countA === 'number' ? sub.countA : 0;
-                let countB = typeof sub.countB === 'number' ? sub.countB : 0;
-                let countC = typeof sub.countC === 'number' ? sub.countC : 0;
-                const answers = sub.answers || {};
-                if (countA === 0 && countB === 0 && countC === 0 && Object.keys(answers).length > 0) {
-                  Object.values(answers).forEach((val) => {
-                    if (val === 0) countA++;
-                    if (val === 1) countB++;
-                    if (val === 2) countC++;
-                  });
-                }
-                map.set(sub.id, {
-                  id: sub.id,
-                  submittedAt: sub.submittedAt || new Date().toISOString(),
-                  countA,
-                  countB,
-                  countC,
-                  totalQuestions:
-                    typeof sub.totalQuestions === 'number' && sub.totalQuestions > 0
-                      ? sub.totalQuestions
-                      : Object.keys(answers).length,
-                  turma: sub.turma
-                });
-              }
-            });
-          }
-        }
-      } catch {}
-      return map;
-    })()
-  );
+  >(new Map());
 
   const [serverInfo, setServerInfo] = useState<ServerInfo>(() => ({
     localhostUrl: 'http://localhost:3000',
@@ -325,18 +258,17 @@ export default function App() {
     []
   );
 
-  // Force-push all current state (settings, questions, submissions/responses) to Firebase Firestore
+  // Force-push questions and settings to Firebase Firestore
   const forcePushEverythingToFirestore = useCallback(
     async (
       questionsToPush: Question[],
       optionsToPush: [string, string, string],
       vpnHostToPush: string,
-      submissionsToPush?: QuizSubmission[],
       showBanner = false
     ) => {
       if (showBanner) {
         setIsForcingSync(true);
-        setDbSyncStatus('Forçando vínculo e gravando todas as coleções no Firebase Firestore...');
+        setDbSyncStatus('Forçando vínculo e gravando configurações no Firebase Firestore...');
       }
       const startTime = performance.now();
 
@@ -400,61 +332,7 @@ export default function App() {
           }
         }
 
-        // 3. Force write any local/server submissions not yet in Firestore
-        if (Array.isArray(submissionsToPush) && submissionsToPush.length > 0) {
-          const existingQuestionIds = new Set(questionsToPush.map((q) => sanitizeId(q.id)));
-          for (const sub of submissionsToPush) {
-            const subId = sanitizeId(sub.id || `sub-${Date.now()}`);
-            let countA = 0;
-            let countB = 0;
-            let countC = 0;
-            const validEntries: { questionId: string; choice: number }[] = [];
-
-            Object.entries(sub.answers || {}).forEach(([rawQId, choice]) => {
-              const qId = sanitizeId(rawQId);
-              if (
-                existingQuestionIds.has(qId) &&
-                (choice === 0 || choice === 1 || choice === 2)
-              ) {
-                if (choice === 0) countA++;
-                if (choice === 1) countB++;
-                if (choice === 2) countC++;
-                validEntries.push({ questionId: qId, choice });
-              }
-            });
-
-            if (validEntries.length > 0) {
-              try {
-                const batch = writeBatch(db);
-                batch.set(doc(db, 'submissions', subId), {
-                  id: subId,
-                  totalQuestions: validEntries.length,
-                  countA,
-                  countB,
-                  countC,
-                  isAnonymous: true,
-                  createdAt: serverTimestamp()
-                });
-                validEntries.forEach((entry, idx) => {
-                  const rId = sanitizeId(`${subId}-r-${idx}`);
-                  batch.set(doc(db, 'responses', rId), {
-                    id: rId,
-                    submissionId: subId,
-                    questionId: entry.questionId,
-                    selectedOption: entry.choice,
-                    isAnonymous: true,
-                    createdAt: serverTimestamp()
-                  });
-                });
-                await batch.commit();
-              } catch {
-                // Ignore if already committed
-              }
-            }
-          }
-        }
-
-        // 4. Verify live read from server (bypassing cache)
+        // 3. Verify live read from server (bypassing cache)
         await getDocFromServer(doc(db, 'settings', 'global'));
         setIsFirebaseConnected(true);
 
@@ -478,6 +356,61 @@ export default function App() {
     },
     []
   );
+
+  // Helper function to sync merged submissions & responses reliably without resurrecting deleted items
+  const syncCombinedSubmissions = useCallback(() => {
+    if (isClearingSubmissionsRef.current) return;
+    setSubmissions(() => {
+      if (submissionsMetaRef.current.size === 0 && responsesBySubRef.current.size === 0) {
+        try {
+          localStorage.removeItem(RESPONSES_HISTORY_KEY);
+        } catch {}
+        return [];
+      }
+
+      const merged = new Map<string, QuizSubmission>();
+
+      // 1. Merge metadata from submissions collection in Firestore
+      submissionsMetaRef.current.forEach((meta, subId) => {
+        const subAnswers = responsesBySubRef.current.get(subId) || {};
+        merged.set(subId, {
+          id: subId,
+          submittedAt: meta.submittedAt || new Date().toISOString(),
+          answers: subAnswers,
+          countA: meta.countA,
+          countB: meta.countB,
+          countC: meta.countC,
+          totalQuestions: meta.totalQuestions,
+          turma: meta.turma
+        });
+      });
+
+      // 2. Merge responses from responses collection
+      responsesBySubRef.current.forEach((answers, subId) => {
+        if (!merged.has(subId)) {
+          merged.set(subId, {
+            id: subId,
+            submittedAt: new Date().toISOString(),
+            answers: answers || {},
+            totalQuestions: Object.keys(answers || {}).length
+          });
+        } else {
+          const existing = merged.get(subId)!;
+          existing.answers = { ...(existing.answers || {}), ...(answers || {}) };
+        }
+      });
+
+      const list = Array.from(merged.values());
+      try {
+        if (list.length > 0) {
+          localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(list));
+        } else {
+          localStorage.removeItem(RESPONSES_HISTORY_KEY);
+        }
+      } catch {}
+      return list;
+    });
+  }, []);
 
   // Real-time Firebase Firestore listeners for ALL collections
   useEffect(() => {
@@ -568,14 +501,11 @@ export default function App() {
                   : localOptionsRaw
                   ? JSON.parse(localOptionsRaw)
                   : ['', '', ''];
-              const fallbackSubs: QuizSubmission[] =
-                serverData && Array.isArray(serverData.submissions) ? serverData.submissions : [];
 
               forcePushEverythingToFirestore(
                 fallbackQuestions,
                 fallbackOptions,
                 serverData?.customVpnHost || '',
-                fallbackSubs,
                 false
               );
             })
@@ -619,132 +549,21 @@ export default function App() {
       }
     );
 
-    // Fast fetch from local server store on boot to merge any responses saved on localhost/LAN immediately
-    fetch('/api/quiz')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((serverData) => {
-        if (serverData && Array.isArray(serverData.submissions) && serverData.submissions.length > 0) {
-          let hasNew = false;
-          serverData.submissions.forEach((s: QuizSubmission) => {
-            if (s && s.id) {
-              const answers = s.answers || {};
-              if (!responsesBySubRef.current.has(s.id) && Object.keys(answers).length > 0) {
-                responsesBySubRef.current.set(s.id, answers);
-                hasNew = true;
-              }
-              if (!submissionsMetaRef.current.has(s.id)) {
-                let countA = 0;
-                let countB = 0;
-                let countC = 0;
-                Object.values(answers).forEach((val) => {
-                  if (val === 0) countA++;
-                  if (val === 1) countB++;
-                  if (val === 2) countC++;
-                });
-                submissionsMetaRef.current.set(s.id, {
-                  id: s.id,
-                  submittedAt: s.submittedAt || new Date().toISOString(),
-                  countA,
-                  countB,
-                  countC,
-                  totalQuestions: Object.keys(answers).length,
-                  turma: s.turma
-                });
-                hasNew = true;
-              }
-            }
-          });
-          if (hasNew) {
-            syncCombinedSubmissions();
-          }
-        }
-      })
-      .catch(() => {});
-
-    // Helper function to sync merged submissions & responses reliably without answer drop
-    const syncCombinedSubmissions = () => {
-      setSubmissions((prev) => {
-        // If both refs were emptied (e.g. admin clicked delete all), clear completely
-        if (submissionsMetaRef.current.size === 0 && responsesBySubRef.current.size === 0) {
-          try {
-            localStorage.removeItem(RESPONSES_HISTORY_KEY);
-          } catch {}
-          return [];
-        }
-
-        const merged = new Map<string, QuizSubmission>();
-
-        // 1. Seed with previously known submissions so async snapshot delays never wipe answers
-        prev.forEach((sub) => {
-          if (
-            sub &&
-            sub.id &&
-            (submissionsMetaRef.current.has(sub.id) || responsesBySubRef.current.has(sub.id))
-          ) {
-            merged.set(sub.id, {
-              ...sub,
-              answers: { ...(sub.answers || {}) }
-            });
-          }
-        });
-
-        // 2. Merge metadata from submissions collection in Firestore
-        submissionsMetaRef.current.forEach((meta, subId) => {
-          const subAnswers = responsesBySubRef.current.get(subId) || {};
-          const existing = merged.get(subId);
-          const combinedAnswers = { ...(existing?.answers || {}), ...subAnswers };
-          merged.set(subId, {
-            id: subId,
-            submittedAt: meta.submittedAt || existing?.submittedAt || new Date().toISOString(),
-            answers: combinedAnswers,
-            countA: meta.countA,
-            countB: meta.countB,
-            countC: meta.countC,
-            totalQuestions: meta.totalQuestions,
-            turma: meta.turma || existing?.turma
-          });
-        });
-
-        // 3. Merge responses from responses collection
-        responsesBySubRef.current.forEach((answers, subId) => {
-          if (!merged.has(subId)) {
-            merged.set(subId, {
-              id: subId,
-              submittedAt: new Date().toISOString(),
-              answers: answers || {},
-              totalQuestions: Object.keys(answers || {}).length
-            });
-          } else {
-            const existing = merged.get(subId)!;
-            existing.answers = { ...(existing.answers || {}), ...(answers || {}) };
-          }
-        });
-
-        const list = Array.from(merged.values());
-        try {
-          if (list.length > 0) {
-            localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(list));
-          } else {
-            localStorage.removeItem(RESPONSES_HISTORY_KEY);
-          }
-        } catch {}
-        return list;
-      });
-    };
-
-    // 3. Listen to Anonymous Responses in Firestore (Real-time & Persistent)
+    // 3. Listen to Anonymous Responses in Firestore (Real-time & Authoritative)
     const qResponses = query(collection(db, 'responses'), where('isAnonymous', '==', true));
     const unsubResponses = onSnapshot(
       qResponses,
       (snapshot) => {
         setIsFirebaseConnected(true);
-        if (snapshot.empty && submissionsMetaRef.current.size === 0) {
+        if (isClearingSubmissionsRef.current) return;
+
+        if (snapshot.empty) {
           responsesBySubRef.current.clear();
           syncCombinedSubmissions();
           return;
         }
 
-        const freshMap = new Map<string, Record<string, number>>(responsesBySubRef.current);
+        const freshMap = new Map<string, Record<string, number>>();
         snapshot.forEach((docSnap) => {
           const data = docSnap.data();
           const subId = String(data.submissionId || '');
@@ -766,13 +585,15 @@ export default function App() {
       }
     );
 
-    // 4. Listen to Anonymous Submissions collection in Firestore
+    // 4. Listen to Anonymous Submissions collection in Firestore (Real-time & Authoritative)
     const qSubmissions = query(collection(db, 'submissions'), where('isAnonymous', '==', true));
     const unsubSubmissions = onSnapshot(
       qSubmissions,
       (snapshot) => {
         setIsFirebaseConnected(true);
-        if (snapshot.empty && responsesBySubRef.current.size === 0) {
+        if (isClearingSubmissionsRef.current) return;
+
+        if (snapshot.empty) {
           submissionsMetaRef.current.clear();
           syncCombinedSubmissions();
           return;
@@ -789,7 +610,7 @@ export default function App() {
             totalQuestions: number;
             turma?: string;
           }
-        >(submissionsMetaRef.current);
+        >();
         snapshot.forEach((docSnap) => {
           const d = docSnap.data();
           const subId = String(d.id || docSnap.id);
@@ -843,7 +664,7 @@ export default function App() {
       unsubSubmissions();
       unsubGateways();
     };
-  }, [forcePushEverythingToFirestore]);
+  }, [forcePushEverythingToFirestore, syncCombinedSubmissions]);
 
   // Fetch local/network adapter info from Express backend
   const fetchServerNetworkInfo = useCallback(async () => {
@@ -876,6 +697,8 @@ export default function App() {
         localStorage.setItem(SAVED_OPTIONS_KEY, JSON.stringify(savedDefaultOptions));
         if (submissions.length > 0) {
           localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(submissions));
+        } else {
+          localStorage.removeItem(RESPONSES_HISTORY_KEY);
         }
       } catch {
         // Ignore storage errors
@@ -1245,7 +1068,10 @@ export default function App() {
       const qSubs = query(collection(db, 'submissions'), where('isAnonymous', '==', true));
       const qResps = query(collection(db, 'responses'), where('isAnonymous', '==', true));
 
-      const [subSnap, respSnap] = await Promise.all([getDocs(qSubs), getDocs(qResps)]);
+      const [subSnap, respSnap] = await Promise.all([
+        getDocsFromServer(qSubs).catch(() => getDocs(qSubs)),
+        getDocsFromServer(qResps).catch(() => getDocs(qResps))
+      ]);
 
       const respBySub: Record<string, Record<string, number>> = {};
       respSnap.forEach((docSnap) => {
@@ -1313,7 +1139,11 @@ export default function App() {
       const list = Array.from(mergedMap.values());
       setSubmissions(list);
       try {
-        localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(list));
+        if (list.length > 0) {
+          localStorage.setItem(RESPONSES_HISTORY_KEY, JSON.stringify(list));
+        } else {
+          localStorage.removeItem(RESPONSES_HISTORY_KEY);
+        }
       } catch {}
       setIsFirebaseConnected(true);
     } catch (err) {
@@ -1575,6 +1405,7 @@ export default function App() {
   const handleClearAllSubmissions = async () => {
     if (isClearingSubmissions) return;
     setIsClearingSubmissions(true);
+    isClearingSubmissionsRef.current = true;
     setClearSuccessStatus(null);
 
     // 1. Zera imediatamente todo o estado local na memória, refs e localStorage de uma vez só
@@ -1585,15 +1416,23 @@ export default function App() {
       localStorage.removeItem(RESPONSES_HISTORY_KEY);
     } catch {}
 
-    // 2. Apaga todas as respostas e submissões do Firestore em lotes atômicos (writeBatch) em paralelo
     try {
+      // 2. Apaga também do servidor local Express e limpa quiz-store.json
+      try {
+        await fetch('/api/quiz/submissions', { method: 'DELETE' });
+      } catch {}
+
+      // 3. Consulta Firestore diretamente na nuvem (sem ler cache obsoleto) e apaga todos os documentos em batches
       const respQuery = query(collection(db, 'responses'), where('isAnonymous', '==', true));
       const subQuery = query(collection(db, 'submissions'), where('isAnonymous', '==', true));
-      const [respSnap, subSnap] = await Promise.all([getDocs(respQuery), getDocs(subQuery)]);
+
+      const [respSnap, subSnap] = await Promise.all([
+        getDocsFromServer(respQuery).catch(() => getDocs(respQuery)),
+        getDocsFromServer(subQuery).catch(() => getDocs(subQuery))
+      ]);
 
       const allDocs = [...respSnap.docs, ...subSnap.docs];
       const BATCH_SIZE = 400;
-      const batchPromises: Promise<void>[] = [];
 
       for (let i = 0; i < allDocs.length; i += BATCH_SIZE) {
         const chunk = allDocs.slice(i, i + BATCH_SIZE);
@@ -1601,22 +1440,25 @@ export default function App() {
         chunk.forEach((d) => {
           batch.delete(d.ref);
         });
-        batchPromises.push(batch.commit());
+        await batch.commit();
       }
 
-      await Promise.all(batchPromises);
-
-      // 3. Limpa também no servidor local se ativo
+      // 4. Limpa novamente para garantir que nenhum resíduo de cache permaneça
+      responsesBySubRef.current.clear();
+      submissionsMetaRef.current.clear();
+      setSubmissions([]);
       try {
-        await fetch('/api/quiz/submissions', { method: 'DELETE' });
+        localStorage.removeItem(RESPONSES_HISTORY_KEY);
       } catch {}
 
-      setClearSuccessStatus('Todas as respostas foram apagadas de uma vez só com sucesso.');
+      setClearSuccessStatus('Todas as respostas foram apagadas de forma definitiva.');
       setTimeout(() => setClearSuccessStatus(null), 4000);
     } catch (error) {
       console.warn('Erro ao apagar respostas em lote no Firebase:', error);
     } finally {
+      isClearingSubmissionsRef.current = false;
       setIsClearingSubmissions(false);
+      syncCombinedSubmissions();
     }
   };
 
